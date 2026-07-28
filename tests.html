@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>受け入れテスト — 適正露出アシスタント</title>
+  <style>
+    :root {
+      --paper: #F4F6F8; --panel: #FFFFFF; --ink: #0E1216; --ink-2: #4A5560;
+      --rule: #C8D0D8; --ok: #0F5D4A; --alert: #96131A;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --paper: #0B0F12; --panel: #151B21; --ink: #EAF0F5; --ink-2: #97A5B1;
+        --rule: #2A343D; --ok: #4FCFA8; --alert: #FF6B6B;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 16px; background: var(--paper); color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif;
+      line-height: 1.6;
+    }
+    h1 { font-size: 18px; margin: 0 0 12px; }
+    #summary {
+      position: sticky; top: 0; background: var(--paper); padding: 8px 0 12px;
+      font-size: 20px; font-weight: 700; border-bottom: 1px solid var(--rule); z-index: 1;
+    }
+    #summary.pass { color: var(--ok); }
+    #summary.fail { color: var(--alert); }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td {
+      text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule);
+      vertical-align: top; font-size: 14px;
+    }
+    th { color: var(--ink-2); font-size: 12px; letter-spacing: .04em; }
+    td.val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+    td.res { font-weight: 700; white-space: nowrap; }
+    tr.fail { background: color-mix(in srgb, var(--alert) 12%, transparent); }
+    tr.fail td.res { color: var(--alert); }
+    tr.pass td.res { color: var(--ok); }
+    .id { color: var(--ink-2); }
+    .name { max-width: 34ch; }
+  </style>
+</head>
+<body>
+  <h1>受け入れテスト（仕様 §12）</h1>
+  <div id="summary">実行中…</div>
+  <table>
+    <thead>
+      <tr><th>#</th><th class="name">内容</th><th>期待値</th><th>実測値</th><th>合否</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script type="module">
+    import { F, SS, ISO, snap } from './js/stops.js';
+    import { solveSS, solveN, solveISO, evTarget, handShakeLimit } from './js/exposure.js';
+    import { solveND } from './js/filters.js';
+    import {
+      gnBase, applyModifier, applyIso, effectiveGN, reachDistance,
+      calibrate, hssLoss, overStops, resolvePower, flashDuration,
+    } from './js/flash.js';
+    import {
+      shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning,
+      daylightSync, slowSyncAmbient, ndCountWarnings, formatStops,
+    } from './js/advisor.js';
+    import { SUBJECTS, POWER_STEPS } from './js/scenes.js';
+
+    // ---- 判定ヘルパー -------------------------------------------------------
+    const rel = (a, b, tol = 0.01) => Math.abs(a - b) <= Math.abs(b) * tol + 1e-9;
+    const near = (a, b, tol = 0.02) => Math.abs(a - b) <= tol;
+    const subjectSS = (key) => SUBJECTS.find(s => s.key === key).ss;
+    const powerDur = (stops) => POWER_STEPS[stops].duration;
+
+    // 各テストは { id, name, run } を持ち、run は { expected, actual, pass } を返す。
+    const T = [];
+    const add = (id, name, run) => T.push({ id, name, run });
+
+    // ===== アンビエント ======================================================
+    add(1, 'EV15 / ISO100 / F16 → SS', () => {
+      const t = solveSS(15, 100, F.real(24)); // F16
+      const s = snap(SS, t);
+      return { expected: '1/125', actual: s.label, pass: s.label === '1/125' };
+    });
+    add(2, 'EV15 / ISO400 / F5.6 → SS', () => {
+      const s = snap(SS, solveSS(15, 400, F.real(15))); // F5.6
+      return { expected: '1/4000', actual: s.label, pass: s.label === '1/4000' };
+    });
+    add(3, 'EV5 / ISO1600 / F1.8 → SS', () => {
+      const s = snap(SS, solveSS(5, 1600, F.real(5))); // F1.8
+      return { expected: '1/160', actual: s.label, pass: s.label === '1/160' };
+    });
+    add(4, 'EV13 / ISO200 / SS1/250 → F', () => {
+      const n = solveN(13, 200, SS.real(24)); // 1/250
+      const s = snap(F, n);
+      return { expected: 'F8.0 (≈8)', actual: `${s.label} (${n.toFixed(3)})`, pass: s.label === '8.0' && rel(n, 8) };
+    });
+    add(5, 'EV8 / F4 / SS1/60 → ISO', () => {
+      const iso = solveISO(8, F.real(12), SS.real(18)); // F4, 1/60
+      const s = snap(ISO, iso);
+      return { expected: 'ISO400', actual: `${s.label} (${iso.toFixed(1)})`, pass: s.label === '400' && rel(iso, 400) };
+    });
+    add('5b', 'EV12 / F4 / SS1/60 → 連続25.0→下限50クランプ+明るすぎ警告', () => {
+      const iso = solveISO(12, F.real(12), SS.real(18)); // = 25.0
+      const s = snap(ISO, iso);
+      const w = isoFloorWarning(iso, 50);
+      const ok = rel(iso, 25) && s.clamped && rel(s.real, 50) && w && w.level === 'alert' && /明るすぎ/.test(w.message);
+      return { expected: '連続25.0 / clamp→50 / alert', actual: `${iso.toFixed(1)} / clamp→${s.real} / ${w ? w.level : 'なし'}`, pass: ok };
+    });
+    add(6, 'EV15 / ISO100 / F16 / 補正+1 → SS', () => {
+      const s = snap(SS, solveSS(15, 100, F.real(24), 1));
+      return { expected: '1/60', actual: s.label, pass: s.label === '1/60' };
+    });
+    add(7, '200mm / 補正0 / SS1/60 → 手ブレ警告 約1.6段', () => {
+      const w = shakeWarning(SS.real(18), 200, 0); // 1/60
+      const ok = w && w.level === 'warn' && formatStops(w.stops) === '1.6' && /1\.6段/.test(w.message);
+      return { expected: 'warn / 1.6段', actual: w ? `${w.level} / ${formatStops(w.stops)}段` : 'なし', pass: ok };
+    });
+    add(8, 'EV16 / ISO100 / F1.4 / SS上限1/8000 → 減光警告 2段以上', () => {
+      const needed = solveSS(16, 100, F.real(3)); // F1.4
+      const w = overBrightWarning(needed, SS.real(39)); // 1/8000
+      const ok = w && w.level === 'alert' && rel(w.stops, 2) && /2段/.test(w.message);
+      return { expected: 'alert / 2段', actual: w ? `${w.level} / ${formatStops(w.stops)}段` : 'なし', pass: ok };
+    });
+    add(9, 'EV15 / ISO100 / F16 / ND16(4段) → SS', () => {
+      const s = snap(SS, solveSS(15, 100, F.real(24), 0, 4));
+      return { expected: '1/8', actual: s.label, pass: s.label === '1/8' };
+    });
+
+    // ===== Ws → GN と校正 ====================================================
+    add(10, 'Ws=100 / k=4.0 → GN', () => {
+      const gn = gnBase(100, 4.0);
+      return { expected: '40', actual: gn.toFixed(2), pass: rel(gn, 40) };
+    });
+    add(11, 'Ws=200 / k=4.0 → GN≈56.6', () => {
+      const gn = gnBase(200, 4.0);
+      return { expected: '≈56.57', actual: gn.toFixed(2), pass: rel(gn, 56.568) };
+    });
+    add(12, '#10 と #11 の段数差 = 1.0段', () => {
+      const diff = 2 * Math.log2(gnBase(200, 4) / gnBase(100, 4));
+      return { expected: '1.0', actual: diff.toFixed(4), pass: near(diff, 1.0, 1e-6) };
+    });
+    add(13, '校正 Ws200/3m/F11/ISO100/1-1 → GN33, k≈2.33', () => {
+      const c = calibrate({ ws: 200, distance: 3, fAperture: 11, iso: 100, powerStops: 0 });
+      const ok = rel(c.gnMeasured, 33) && rel(c.k, 2.333, 0.005);
+      return { expected: 'GN33 / k≈2.33', actual: `GN${c.gnMeasured} / k${c.k.toFixed(3)}`, pass: ok };
+    });
+    add(14, '校正 Ws200/3m/F11/ISO400/1-4 → GN33, k≈2.33', () => {
+      const c = calibrate({ ws: 200, distance: 3, fAperture: 11, iso: 400, powerStops: 2 });
+      const ok = rel(c.gnAtIso100Full, 33) && rel(c.k, 2.333, 0.005);
+      return { expected: 'GN33 / k≈2.33', actual: `GN${c.gnAtIso100Full.toFixed(1)} / k${c.k.toFixed(3)}`, pass: ok };
+    });
+
+    // ===== ND 組み合わせ =====================================================
+    add(15, 'solveND([1,2,3,4],4) → ND16 のみ 1枚', () => {
+      const r = solveND([1, 2, 3, 4], 4);
+      const ok = r.count === 1 && r.totalStops === 4 && r.excess === 0;
+      return { expected: '1枚 / 4段 / 超過0', actual: `${r.count}枚 / ${r.totalStops}段 / 超過${r.excess}`, pass: ok };
+    });
+    add(16, 'solveND([1,2,3,4],5) → 2枚 合計5 超過0', () => {
+      const r = solveND([1, 2, 3, 4], 5);
+      const ok = r.count === 2 && r.totalStops === 5 && r.excess === 0;
+      return { expected: '2枚 / 5段 / 超過0', actual: `${r.count}枚 / ${r.totalStops}段 / 超過${r.excess}`, pass: ok };
+    });
+    add(17, 'solveND([1,2,3,4],8) → 3枚 合計8 + ケラレ警告', () => {
+      const r = solveND([1, 2, 3, 4], 8);
+      const w = ndCountWarnings(r, { baseISO: 200, expandedISOMin: 50, ownedND: [1, 2, 3, 4], wallStops: 8 });
+      const kerare = w.some(x => x.level === 'warn' && /ケラレ/.test(x.message));
+      const ok = r.count === 3 && r.totalStops === 8 && kerare;
+      return { expected: '3枚 / 8段 / ケラレwarn', actual: `${r.count}枚 / ${r.totalStops}段 / ${kerare ? 'warnあり' : 'なし'}`, pass: ok };
+    });
+    add(18, 'solveND([1,2,3,4],11) → null', () => {
+      const r = solveND([1, 2, 3, 4], 11);
+      return { expected: 'null', actual: String(r), pass: r === null };
+    });
+
+    // ===== 日中シンクロ ======================================================
+    const DS_BASE = {
+      evScene: 15, iso: 200, comp: 0, syncSpeedReal: SS.real(24), // 1/250
+      ownedND: [1, 2, 3, 4], ws: 200, k: 4.0, modLoss: 0,
+      hssCapable: true, hssBaseLoss: 2.0, baseISO: 200, expandedISOMin: 50,
+    };
+    add(19, 'EV15/ISO200/同調1-250/アンビエント0/NDなし → F16', () => {
+      const r = daylightSync({ ...DS_BASE, ambientOffset: 0 });
+      const ok = r.fAtSync.label === '16' && rel(r.fAtSyncReal, 16);
+      return { expected: 'F16', actual: `${r.fAtSync.label} (${r.fAtSyncReal.toFixed(2)})`, pass: ok };
+    });
+    add(20, '#19 で希望F2.8 → 同調速度の壁 約5段', () => {
+      const r = daylightSync({ ...DS_BASE, ambientOffset: 0, desiredN: F.real(9) }); // F2.8
+      return { expected: '≈5段', actual: r.wallStops.toFixed(3), pass: rel(r.wallStops, 5) };
+    });
+    add(21, '#20 ND経路 200Ws/k4/標準 ISO200 → ND2+ND16(2枚)/有効GN≈14.1/到達5.0m + 拡張ISO info', () => {
+      const r = daylightSync({ ...DS_BASE, ambientOffset: 0, desiredN: F.real(9) });
+      const nd = r.ndPath;
+      const info = r.warnings.some(w => w.level === 'info' && /拡張/.test(w.message));
+      const ok = nd.count === 2 && nd.totalStops === 5 && rel(nd.gnEff, 14.14, 0.02) && rel(nd.reach, 5.0, 0.02) && info;
+      return { expected: '2枚/GN≈14.1/5.0m/info', actual: `${nd.count}枚/GN${nd.gnEff.toFixed(2)}/${nd.reach.toFixed(2)}m/${info ? 'info' : 'なし'}`, pass: ok };
+    });
+    add(22, '#20 HSS経路 hssBase2.0 ISO200 → SS1/8000/損失7段/有効GN≈7.07/到達2.5m', () => {
+      const r = daylightSync({ ...DS_BASE, ambientOffset: 0, desiredN: F.real(9) });
+      const h = r.hssPath;
+      const ok = h.ss.label === '1/8000' && rel(h.hssLoss, 7) && rel(h.gnEff, 7.07, 0.02) && rel(h.reach, 2.5, 0.02);
+      return { expected: '1/8000/7段/GN≈7.07/2.5m', actual: `${h.ss.label}/${h.hssLoss.toFixed(2)}段/GN${h.gnEff.toFixed(2)}/${h.reach.toFixed(2)}m`, pass: ok };
+    });
+    add(23, '#21 と #22 の到達距離比 = 2倍（ND経路が2段有利）', () => {
+      const r = daylightSync({ ...DS_BASE, ambientOffset: 0, desiredN: F.real(9) });
+      const ratio = r.ndPath.reach / r.hssPath.reach;
+      return { expected: '2.0', actual: ratio.toFixed(3), pass: rel(ratio, 2.0) };
+    });
+
+    // ===== スローシンクロ ====================================================
+    add(24, 'EV5/ISO400/F2.8/アンビエント−1段 → SS1/30', () => {
+      const r = slowSyncAmbient({ evScene: 5, iso: 400, N: F.real(9), ambientOffset: -1 }); // F2.8
+      return { expected: '1/30', actual: r.ss.label, pass: r.ss.label === '1/30' };
+    });
+    add(25, '#24 で焦点距離85mm・三脚なし → 手ブレ warn（約1.4段）', () => {
+      const r = slowSyncAmbient({ evScene: 5, iso: 400, N: F.real(9), ambientOffset: -1 });
+      const w = shakeWarning(r.ss.real, 85, 0);
+      const ok = w && w.level === 'warn' && rel(w.stops, 1.4, 0.05);
+      return { expected: 'warn / ≈1.4段', actual: w ? `${w.level} / ${formatStops(w.stops)}段` : 'なし', pass: ok };
+    });
+    add(26, '#24 の SS を 1/8 に変更 → ストロボ必要発光量が変わらない', () => {
+      // ストロボ側は SS に依存しない。同じ機材条件なら SS を変えても発光量は不変。
+      const gi = applyIso(applyModifier(gnBase(200, 4), 0), 400);
+      const N = F.real(9), dist = 5;
+      const pAt30 = resolvePower(overStops(effectiveGN(gi, 0, 0, 0), N, dist)); // SS 1/30 の文脈
+      const pAt8 = resolvePower(overStops(effectiveGN(gi, 0, 0, 0), N, dist));  // SS 1/8 の文脈
+      const ok = pAt30.powerStops === pAt8.powerStops;
+      return { expected: '同一', actual: `1/30→${pAt30.powerStops}段 / 1/8→${pAt8.powerStops}段`, pass: ok };
+    });
+    add(27, '#24 に ND8(3段) 追加 → 必要発光量が3段増える', () => {
+      const gi = applyIso(applyModifier(gnBase(200, 4), 0), 400);
+      const N = F.real(9), dist = 5;
+      const overNoND = overStops(effectiveGN(gi, 0, 0, 0), N, dist);
+      const overND3 = overStops(effectiveGN(gi, 0, 3, 0), N, dist);
+      const pNo = resolvePower(overNoND).powerStops;
+      const pNd = resolvePower(overND3).powerStops;
+      // 過剰段数が3減る＝発光量を3段上げる（powerStops が3減る）
+      const ok = near(overNoND - overND3, 3, 1e-9) && (pNo - pNd) === 3;
+      return { expected: '発光量 +3段', actual: `Δover=${(overNoND - overND3).toFixed(3)} / power ${pNo}→${pNd}`, pass: ok };
+    });
+    add(28, '発光量1/1 / 走る人(1/500) → 閃光時間1/250 → 止まりません warn', () => {
+      const w = freezeWarning(powerDur(0), subjectSS('running'));
+      const ok = w && w.level === 'warn' && flashDuration(0) === powerDur(0);
+      return { expected: 'warn (1/250)', actual: w ? `${w.level}` : '警告なし', pass: ok };
+    });
+    add(29, '発光量1/32 / 走る人 → 閃光時間1/3500 → 警告なし', () => {
+      const w = freezeWarning(powerDur(5), subjectSS('running'));
+      return { expected: '警告なし', actual: w ? w.level : '警告なし', pass: w === null };
+    });
+
+    // ===== テーブル ==========================================================
+    add(30, 'snap(SS, 16.0) → ラベル 15″, index −12', () => {
+      const s = snap(SS, 16.0);
+      const ok = s.label === '15″' && s.index === -12;
+      return { expected: '15″ / −12', actual: `${s.label} / ${s.index}`, pass: ok };
+    });
+    add(31, '全系列：ラベル配列長 = 生成インデックス数', () => {
+      const check = (series) => {
+        const count = series.maxIndex - series.minIndex + 1;
+        if (series.labels.length !== count) return false;
+        for (let i = series.minIndex; i <= series.maxIndex; i++) {
+          if (typeof series.label(i) !== 'string') return false;
+          if (!Number.isFinite(series.real(i))) return false;
+        }
+        return true;
+      };
+      const ok = check(F) && check(SS) && check(ISO);
+      const detail = `F:${F.labels.length}/${F.maxIndex - F.minIndex + 1} SS:${SS.labels.length}/${SS.maxIndex - SS.minIndex + 1} ISO:${ISO.labels.length}/${ISO.maxIndex - ISO.minIndex + 1}`;
+      return { expected: '全系列一致', actual: detail, pass: ok };
+    });
+
+    // ---- 実行 & 描画 --------------------------------------------------------
+    const rows = document.getElementById('rows');
+    let passed = 0;
+    for (const test of T) {
+      let r;
+      try {
+        r = test.run();
+      } catch (e) {
+        r = { expected: '(実行成功)', actual: `例外: ${e.message}`, pass: false };
+      }
+      if (r.pass) passed++;
+      const tr = document.createElement('tr');
+      tr.className = r.pass ? 'pass' : 'fail';
+      tr.innerHTML =
+        `<td class="id">${test.id}</td>` +
+        `<td class="name">${test.name}</td>` +
+        `<td class="val">${r.expected}</td>` +
+        `<td class="val">${r.actual}</td>` +
+        `<td class="res">${r.pass ? '✓ 成功' : '✗ 失敗'}</td>`;
+      rows.appendChild(tr);
+    }
+    const summary = document.getElementById('summary');
+    summary.textContent = `全 ${T.length} 件中 ${passed} 件成功`;
+    summary.className = passed === T.length ? 'pass' : 'fail';
+  </script>
+</body>
+</html>

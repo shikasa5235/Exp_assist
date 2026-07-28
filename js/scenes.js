@@ -1,0 +1,91 @@
+// scenes.js — 定数データのみ。副作用ゼロ（DOM・localStorage・window に触らない）。
+// 計算モジュールが参照する表引きデータ。マジックナンバーはここか各モジュール冒頭に集約する。
+
+/**
+ * シーン EV（ISO100 基準の EV100）。仕様 §7.1。
+ * ±1段程度の目安。UI 側で ±2段(1/3刻み)の微調整を用意する前提。
+ * @type {ReadonlyArray<{key:string,label:string,ev:number,group:string}>}
+ */
+export const SCENES = Object.freeze([
+  // 屋外
+  { key: 'snow',       label: '雪山・砂浜の直射', ev: 16, group: '屋外' },
+  { key: 'sunny',      label: '快晴・順光',       ev: 15, group: '屋外' },
+  { key: 'hazySun',    label: '晴れ・薄曇り',     ev: 14, group: '屋外' },
+  { key: 'cloudy',     label: '曇り',             ev: 13, group: '屋外' },
+  { key: 'heavyCloud', label: '厚い曇り／日陰',   ev: 12, group: '屋外' },
+  { key: 'sunset',     label: '日没直後',         ev: 11, group: '屋外' },
+  { key: 'twilight',   label: '薄暮',             ev: 9,  group: '屋外' },
+  // 屋内・夜間
+  { key: 'shop',       label: '明るい店舗',       ev: 8,  group: '屋内・夜間' },
+  { key: 'neon',       label: '夜の繁華街',       ev: 8,  group: '屋内・夜間' },
+  { key: 'stage',      label: 'ステージ・体育館', ev: 7,  group: '屋内・夜間' },
+  { key: 'room',       label: '一般的な室内',     ev: 5,  group: '屋内・夜間' },
+  { key: 'street',     label: '街灯のある夜道',   ev: 4,  group: '屋内・夜間' },
+  { key: 'candle',     label: 'ろうそく／間接',   ev: 3,  group: '屋内・夜間' },
+  { key: 'moon',       label: '満月の風景',       ev: -2, group: '屋内・夜間' },
+  { key: 'milkyway',   label: '天の川・星景',     ev: -6, group: '屋内・夜間' },
+]);
+
+/**
+ * 被写体ブレの必要 SS（秒）。仕様 §7.2。ss=null は制約なし。
+ * @type {ReadonlyArray<{key:string,label:string,ss:number|null}>}
+ */
+export const SUBJECTS = Object.freeze([
+  { key: 'static',   label: '静物・風景',       ss: null },
+  { key: 'portrait', label: '人物（軽い動き）', ss: 1 / 125 },
+  { key: 'walking',  label: '歩く人・子ども',   ss: 1 / 250 },
+  { key: 'running',  label: '走る人・ペット',   ss: 1 / 500 },
+  { key: 'sports',   label: 'スポーツ・自転車', ss: 1 / 1000 },
+  { key: 'vehicle',  label: '車・電車・飛ぶ鳥', ss: 1 / 2000 },
+]);
+
+/**
+ * モディファイア減光段数（目安・校正対象）。仕様 §7.5。
+ * グリッド/ディフューザーは加算で表現する前提の基本値。
+ * @type {ReadonlyArray<{key:string,label:string,loss:number}>}
+ */
+export const MODIFIERS = Object.freeze([
+  { key: 'reflector', label: '標準リフレクター',       loss: 0 },
+  { key: 'bare',      label: 'ベアバルブ',             loss: 1.0 },
+  { key: 'umbSilver', label: '反射アンブレラ(銀)',     loss: 1.5 },
+  { key: 'umbTrans',  label: '透過アンブレラ',         loss: 2.0 },
+  { key: 'sbSmall',   label: 'ソフトボックス60cm以下', loss: 2.0 },
+  { key: 'sbLarge',   label: 'ソフトボックス90cm以上', loss: 2.5 },
+  { key: 'beauty',    label: 'ビューティディッシュ',   loss: 1.5 },
+]);
+
+/** グリッド/ディフューザーの追加減光（モディファイアに加算）。仕様 §7.5。 */
+export const MODIFIER_ADDONS = Object.freeze({ grid: 1.5, diffuser: 0.5 });
+
+/**
+ * 発光量ステップと閃光時間の目安。仕様 §7.4 / §7.6。
+ * stops = フル発光からの段数(0..7)。duration = t0.1 の目安(秒)。
+ * @type {ReadonlyArray<{stops:number,label:string,duration:number}>}
+ */
+export const POWER_STEPS = Object.freeze([
+  { stops: 0, label: '1/1',   duration: 1 / 250 },
+  { stops: 1, label: '1/2',   duration: 1 / 400 },
+  { stops: 2, label: '1/4',   duration: 1 / 700 },
+  { stops: 3, label: '1/8',   duration: 1 / 1200 },
+  { stops: 4, label: '1/16',  duration: 1 / 2000 },
+  { stops: 5, label: '1/32',  duration: 1 / 3500 },
+  { stops: 6, label: '1/64',  duration: 1 / 5000 },
+  { stops: 7, label: '1/128', duration: 1 / 9000 },
+]);
+
+/** APEX の基準 ISO。EV 換算の分母。 */
+export const ISO_REF = 100;
+
+/** ISO の 2 段構え下限（仕様確定事項）。 */
+export const BASE_ISO_DEFAULT = 200;        // 常用下限（意図別ロジックの ISO 固定起点）
+export const EXPANDED_ISO_MIN_DEFAULT = 50; // 拡張下限（代替案でのみ使用、画質低下の可能性）
+
+/** 機材係数 k の既定・範囲（仕様 §5.2 / §10）。 */
+export const K_DEFAULT = 4.0;
+export const K_MIN = 2.0;
+export const K_MAX = 6.0;
+
+/** HSS 基準損失の既定・範囲（仕様 §5.4 / §10）。 */
+export const HSS_BASE_LOSS_DEFAULT = 2.0;
+export const HSS_BASE_LOSS_MIN = 1.0;
+export const HSS_BASE_LOSS_MAX = 2.5;
