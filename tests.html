@@ -271,6 +271,22 @@
       return { expected: '全系列一致', actual: detail, pass: ok };
     });
 
+    // ===== ND 枚数警告（拡張ISO 導線／ケラレ）==============================
+    add(32, 'ndCountWarnings: 2枚→拡張ISO info(ND1枚) / 3枚→ケラレwarn', () => {
+      const two = ndCountWarnings(solveND([1, 2, 3, 4], 5), { baseISO: 200, expandedISOMin: 50, ownedND: [1, 2, 3, 4], wallStops: 5 });
+      const three = ndCountWarnings(solveND([1, 2, 3, 4], 8), { baseISO: 200, expandedISOMin: 50, ownedND: [1, 2, 3, 4], wallStops: 8 });
+      const twoInfo = two.some((w) => w.level === 'info' && /拡張/.test(w.message) && /ND 1枚/.test(w.message));
+      const twoNoKerare = !two.some((w) => /ケラレ/.test(w.message));
+      const threeInfo = three.some((w) => w.level === 'info' && /拡張/.test(w.message));
+      const threeKerare = three.some((w) => w.level === 'warn' && /ケラレ/.test(w.message));
+      const ok = twoInfo && twoNoKerare && threeInfo && threeKerare;
+      return {
+        expected: '2枚:info(ND1枚)/warnなし, 3枚:info+ケラレ',
+        actual: `2枚:${twoInfo ? 'info' : '×'}/${twoNoKerare ? 'warnなし' : 'warnあり'}, 3枚:${threeInfo ? 'info' : '×'}+${threeKerare ? 'ケラレ' : '×'}`,
+        pass: ok,
+      };
+    });
+
     // ---- 実行 & 描画 --------------------------------------------------------
     const rows = document.getElementById('rows');
     let passed = 0;
