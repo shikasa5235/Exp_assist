@@ -21,6 +21,16 @@ export function formatStops(x) {
 }
 
 /**
+ * 符号付きの段数を「−1.3」「+0.5」「0.0」の形に整形する（背景段数の表示用）。
+ * @param {number} x 段数（負で暗い）
+ * @returns {string}
+ */
+export function formatOffset(x) {
+  const sign = x > 0 ? '+' : x < 0 ? '−' : '';
+  return `${sign}${Math.abs(x).toFixed(1)}`;
+}
+
+/**
  * 手ブレ警告。SS が手ブレ限界より遅く、かつ不足が 1/3段以上のとき warn。仕様 §9。
  * @param {number} ssReal シャッター速度（秒、厳密値）
  * @param {number} focal 焦点距離(mm)
@@ -152,6 +162,7 @@ export function daylightSync(p) {
     evScene, iso, comp = 0, syncSpeedReal, ambientOffset = 0,
     desiredN = null, ownedND = [], ws, k = 4.0, modLoss = 0,
     hssCapable = true, hssBaseLoss = 2.0, baseISO, expandedISOMin,
+    maxSSReal = null,
   } = p;
 
   const evT = evTarget(evScene, iso, comp, 0);
@@ -179,12 +190,26 @@ export function daylightSync(p) {
     out.ndPath = null;
   }
 
-  // HSS 経路：希望F値でアンビエント適正になる SS を求め、HSS 損失を反映
+  // HSS 経路：希望F値でアンビエント適正になる SS を求め、HSS 損失を反映。
+  // SS 上限を超える要求は達成できないのでクランプし、損失・到達距離は
+  // 「実際に使う SS」から求める。達成できる背景段数も返して黙って外さない。
   if (hssCapable) {
-    const tH = (desiredN * desiredN) / 2 ** evAmbient;
-    const loss = hssLoss(hssBaseLoss, syncSpeedReal, tH);
+    const tIdeal = (desiredN * desiredN) / 2 ** evAmbient;
+    const tUsed = maxSSReal != null ? Math.max(tIdeal, maxSSReal) : tIdeal;
+    const clampStops = tUsed > tIdeal ? Math.log2(tUsed / tIdeal) : 0; // 背景が明るくなる段数
+    const loss = hssLoss(hssBaseLoss, syncSpeedReal, tUsed);
     const gnEff = effectiveGN(gnIso, 0, 0, loss);
-    out.hssPath = { ssReal: tH, ss: snap(SS, tH), hssLoss: loss, gnEff, reach: gnEff / desiredN };
+    const achievableOffset = ambientOffset + clampStops;
+    out.hssPath = {
+      ssReal: tUsed, ss: snap(SS, tUsed), hssLoss: loss, gnEff, reach: gnEff / desiredN,
+      ssClamped: clampStops > 1e-6, clampStops, achievableOffset,
+    };
+    if (clampStops > 1e-6) {
+      out.warnings.push({
+        level: 'warn', icon: 'hss',
+        message: `HSS経路は SS上限のため背景は ${formatOffset(achievableOffset)}段までです（${formatStops(clampStops)}段明るくなります）`,
+      });
+    }
   }
 
   return out;

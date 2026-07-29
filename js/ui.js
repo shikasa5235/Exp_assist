@@ -511,6 +511,7 @@ function renderCalc() {
   });
   calcNdSuffix.textContent = sum ? `合計 ${sum}段（−${sum}EV）` : '装着なし';
   const m = derived.manual; if (!m) return;
+  console.log('[solve]', m.diag); // TODO(バグ③調査・確認後に削除)
   ['f', 'ss', 'iso'].forEach((key) => {
     const locked = key !== m.computedKey;
     const slot = wheels.calc[key];
@@ -759,7 +760,7 @@ function systemsHtml(d) {
 }
 
 function pathHtml(p) {
-  const row = (name, r) => r ? `<tr><td>${name}</td><td>${r.ss}</td><td>${r.nd}</td><td>${r.power}</td><td>${r.reach.toFixed(1)}m</td></tr>` : '';
+  const row = (name, r) => r ? `<tr><td>${name}${r.note ? `<br><span class="caption">${r.note}</span>` : ''}</td><td>${r.ss}</td><td>${r.nd}</td><td>${r.power}</td><td>${r.reach.toFixed(1)}m</td></tr>` : '';
   return `<table>
     <thead><tr><th>経路</th><th>SS</th><th>ND</th><th>発光量</th><th>到達</th></tr></thead>
     <tbody>${row('ND経路', p.nd)}${row('HSS経路', p.hss)}</tbody>

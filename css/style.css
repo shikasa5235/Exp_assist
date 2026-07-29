@@ -316,6 +316,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .path-compare th:first-child, .path-compare td:first-child { text-align: left; font-family: var(--font-text); color: var(--ink-2); }
 .path-compare thead th { color: var(--ink-2); font-weight: 600; border-bottom: 1px solid var(--rule); }
 .path-compare .adv { color: var(--ok); }
+.path-compare .caption { font-size: 12px; color: var(--warn); font-family: var(--font-text); }
 
 .warnings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .warn-item { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.45; }

@@ -9,7 +9,7 @@ import {
 } from './flash.js';
 import {
   shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning,
-  daylightSync, slowSyncAmbient, formatStops,
+  daylightSync, slowSyncAmbient, formatStops, formatOffset,
 } from './advisor.js';
 import { SUBJECTS, MODIFIERS, POWER_STEPS } from './scenes.js';
 
@@ -288,6 +288,8 @@ function manualResult(ev, st) {
   if (computedKey === 'ss') ssReal = solveSS(ev, isoReal, fReal, comp, nd);
   else if (computedKey === 'iso') isoReal = solveISO(ev, fReal, ssReal, comp, nd);
   else fReal = solveN(ev, isoReal, ssReal, comp, nd);
+  // 丸め前の連続値（診断用。丸めは snapTriple で表示直前に一度だけ行う）
+  const solved = { fCont: fReal, tCont: ssReal, isoCont: isoReal };
   // 自由軸が範囲外＝ND等を吸収しきれない。ロックは破らずクランプし不足を警告（仕様の穴埋め）。
   let warning = null;
   const hasND = nd > 0;
@@ -301,7 +303,19 @@ function manualResult(ev, st) {
     if (fReal < lens.fMin) { warning = manualShort('F', 2 * Math.log2(lens.fMin / fReal), 'short', hasND); fReal = lens.fMin; }
     else if (fReal > lens.fMax) { warning = manualShort('F', 2 * Math.log2(fReal / lens.fMax), 'bright', hasND); fReal = lens.fMax; }
   }
-  return { ...snapTriple(fReal, ssReal, isoReal), computedKey, warning };
+  const snapped = snapTriple(fReal, ssReal, isoReal);
+  // TODO(バグ③調査・確認後に削除): 自由軸の連続値と丸め結果を突き合わせる材料
+  const diag = {
+    evScene: ev,
+    evTarget: evTarget(ev, isoReal, comp, nd),
+    ...solved,
+    fIndex: snapped.f.index, fShown: snapped.f.label,
+    ssIndexShown: snapped.ss.index, ssShown: snapped.ss.label,
+    isoShown: snapped.iso.label,
+    computedKey, locks: { ...L }, nd, comp,
+    stateIdx: { f: manual.fIndex, ss: manual.ssIndex, iso: manual.isoIndex },
+  };
+  return { ...snapped, computedKey, warning, diag };
 }
 
 /* ====================================================================== */
@@ -375,6 +389,7 @@ function computeManual(st, evScene, prof, modLoss, d) {
     d.flash = flashCard(fs, st.flash.distance, d.uncalibrated, 'manual');
     flashRangeWarnings(fs, st.flash.distance, d);
     powerStops = fs.powerStops;
+    m.diag.powerStopsCont = fs.over; // TODO(バグ③調査・確認後に削除)
   }
   d.ruler = { deviation: 0, tracks: buildTracks(null, powerStops) };
   d.evSetting = Math.log2(m.f.real ** 2 / m.ss.real);
@@ -389,6 +404,7 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
     ambientOffset: flash.ambientOffset, desiredN, ownedND: settings.ownedND,
     ws: prof.ws, k: prof.k, modLoss, hssCapable: prof.hss, hssBaseLoss: settings.hssBaseLoss,
     baseISO: camera.isoMin, expandedISOMin: camera.expandedISOMin,
+    maxSSReal: camera.maxSS, // SS 上限。超える要求はクランプし達成可能な背景段数を返す
   });
   d.warnings.push(...dp.warnings);
 
@@ -419,7 +435,9 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   if (dp.hssPath) {
     const fs = flashSettings(dp.hssPath.gnEff, desiredN, flash.distance, prof.minPowerStops);
     d.paths.hss = { ss: dp.hssPath.ss.label, nd: 'なし', power: fs.powerLabel, reach: fs.reach,
-      lossStops: dp.hssPath.hssLoss };
+      lossStops: dp.hssPath.hssLoss,
+      ssClamped: dp.hssPath.ssClamped, achievableOffset: dp.hssPath.achievableOffset,
+      note: dp.hssPath.ssClamped ? `背景 ${formatOffset(dp.hssPath.achievableOffset)}段まで` : '' };
   }
   if (d.paths.nd && d.paths.hss) {
     // 有利段数は損失差そのもの（lossHSS − lossND）。到達距離比から求めるなら 2*log2(比)。

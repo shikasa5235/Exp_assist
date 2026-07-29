@@ -344,6 +344,29 @@
       const ok = rel(ratio, 2.0, 0.02) && rel(adv, 2.0, 0.02) && /2段有利/.test(d.paths.advantage || '');
       return { expected: '比2.0 / 2段有利', actual: `比${ratio.toFixed(3)} / ${adv.toFixed(3)}段 "${d.paths.advantage || ''}"`, pass: ok };
     });
+    add('30c', 'compute 日中: HSS が SS上限で頭打ち → クランプ後SSで到達再計算＋達成可能な背景段数', () => {
+      // EV14/ISO200/F2.8/背景−2段 → 理想SS 1/16384 は上限 1/8192 を超える（1段ぶん達成不能）
+      const d = compute(dayState({
+        scene: { evBase: 14, adjust: 0 },
+        camera: { syncSpeed: SYNC, isoMin: 200, maxSS: 2 ** -13 },
+        flash: { profileId: 'p1', modifier: 'reflector', distance: 2, ambientOffset: -2 },
+      }));
+      const h = d.paths.hss;
+      // クランプ後SSから期待到達距離を独立に再計算（表示SSと到達距離の整合を検証）
+      const lossFromShown = 2.0 + Math.log2(SYNC / (2 ** -13));
+      const gnIso = 4.0 * Math.sqrt(100) * Math.sqrt(200 / 100);
+      const reachExpect = (gnIso * 2 ** (-lossFromShown / 2)) / F28;
+      const warned = d.warnings.some((w) => /SS上限/.test(w.message) && /−1\.0段/.test(w.message));
+      const ok = h.ss === '1/8000' && h.ssClamped === true
+        && rel(h.achievableOffset, -1.0, 0.02)
+        && rel(h.lossStops, lossFromShown, 0.01)
+        && rel(h.reach, reachExpect, 0.02) && warned;
+      return {
+        expected: `1/8000 / clamp / 背景−1.0段 / 到達${reachExpect.toFixed(2)}m / 警告`,
+        actual: `${h.ss} / clamp=${h.ssClamped} / 背景${h.achievableOffset.toFixed(2)}段 / 到達${h.reach.toFixed(2)}m / ${warned ? '警告あり' : '警告なし'}`,
+        pass: ok,
+      };
+    });
     add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {
       const a = compute(slowState({ flash: { profileId: 'p1', distance: 8, ambientOffset: -1, tripod: true } }));
       const b = compute(slowState({ flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true } }));
