@@ -24,10 +24,10 @@ function ndStops(st) { return (st.nd || []).reduce((a, b) => a + b, 0); }
 /** ND 段数 → 表示名（ND2/ND4/…）。 @param {number} stops @returns {string} */
 function ndName(stops) { return `ND${2 ** stops}`; }
 
-/** ND 段数配列 → 連結ラベル（例 "ND2+ND16"）。装着なしは空文字。 */
+/** ND 段数配列 → 連結ラベル（例 "ND2+ND16"）。表示は薄い順に統一。装着なしは空文字。 */
 function ndLabelOf(stopsArr) {
   if (!stopsArr || !stopsArr.length) return '';
-  return stopsArr.map(ndName).join('+');
+  return [...stopsArr].sort((a, b) => a - b).map(ndName).join('+');
 }
 
 /** モディファイアキー → 減光段数。 @param {string} key @returns {number} */
@@ -405,29 +405,29 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
     ndLabel: ndPathLabel, offset: flash.ambientOffset,
   };
 
-  // ストロボ側（既定は ND 経路の推奨値）
+  // 経路比較表（ND / HSS を並べる。自動選択しない）。ストロボ側の既定表示は ND 経路。
   let powerStops = null;
+  d.paths = { nd: null, hss: null };
   if (dp.ndPath) {
     const fs = flashSettings(dp.ndPath.gnEff, desiredN, flash.distance, prof.minPowerStops);
     powerStops = fs.powerStops;
     d.flash = flashCard(fs, flash.distance, d.uncalibrated, 'nd');
     flashRangeWarnings(fs, flash.distance, d);
-  }
-
-  // 経路比較表（ND / HSS を並べる。自動選択しない）
-  d.paths = { nd: null, hss: null };
-  if (dp.ndPath) {
-    const fs = flashSettings(dp.ndPath.gnEff, desiredN, flash.distance, prof.minPowerStops);
     d.paths.nd = { ss: snap(SS, camera.syncSpeed).label, nd: ndPathLabel || '—',
-      power: fs.powerLabel, reach: fs.reach };
+      power: fs.powerLabel, reach: fs.reach, lossStops: dp.ndPath.totalStops };
   }
   if (dp.hssPath) {
     const fs = flashSettings(dp.hssPath.gnEff, desiredN, flash.distance, prof.minPowerStops);
-    d.paths.hss = { ss: dp.hssPath.ss.label, nd: 'なし', power: fs.powerLabel, reach: fs.reach };
+    d.paths.hss = { ss: dp.hssPath.ss.label, nd: 'なし', power: fs.powerLabel, reach: fs.reach,
+      lossStops: dp.hssPath.hssLoss };
   }
   if (d.paths.nd && d.paths.hss) {
-    const adv = Math.log2(d.paths.nd.reach / d.paths.hss.reach);
+    // 有利段数は損失差そのもの（lossHSS − lossND）。到達距離比から求めるなら 2*log2(比)。
+    // 光量は距離の2乗に反比例するため log2(比) では半分になる（仕様テスト #23 が定義する関係）。
+    const adv = d.paths.hss.lossStops - d.paths.nd.lossStops;
+    d.paths.advantageStops = adv;
     if (adv > 0.1) d.paths.advantage = `ND経路が${formatStops(adv)}段有利`;
+    else if (adv < -0.1) d.paths.advantage = `HSS経路が${formatStops(-adv)}段有利`;
   }
   if (!dp.ndPath && !dp.hssPath) {
     d.warnings.push({ level: 'alert', icon: 'alert', message: '同調速度の壁を越えられません。F を絞ってください' });
@@ -492,6 +492,7 @@ function flashCard(fs, distance, uncalibrated, path) {
   const fecText = Math.abs(fs.fec) < 0.05 ? '' : `FEC ${fs.fec > 0 ? '−' : '＋'}${Math.abs(fs.fec).toFixed(1)}`;
   return {
     powerLabel: fs.powerLabel, fecText, path,
+    reach: fs.reach, // 数値（テスト・比較用）。表示は reachText を使う
     reachText: `到達 ${fs.reach.toFixed(1)}m（設定 ${distance}m）`,
     durationLabel: fs.durationLabel, uncalibrated,
   };

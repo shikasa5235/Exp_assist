@@ -20,7 +20,15 @@
 function isBetter(a, b) {
   if (a.count !== b.count) return a.count < b.count;
   if (a.excess !== b.excess) return a.excess < b.excess;
-  return a.totalStops < b.totalStops;
+  if (a.totalStops !== b.totalStops) return a.totalStops < b.totalStops;
+  // 同枚数・同超過・同段数のときは「濃い側から貪欲に取った解」に一致させ、解を一意にする。
+  // 段数の降順に並べて辞書式で大きい方を採る：5段なら [4,1](ND16+ND2) が [3,2](ND8+ND4) に勝つ。
+  const da = [...a.filters].sort((x, y) => y - x);
+  const db = [...b.filters].sort((x, y) => y - x);
+  for (let i = 0; i < da.length; i++) {
+    if (da[i] !== db[i]) return da[i] > db[i];
+  }
+  return false;
 }
 
 /**
@@ -46,6 +54,8 @@ export function solveND(ownedStops, required) {
       }
     }
     if (sum < required) continue;
+    // filters は表示順（薄い順＝段数の昇順）で返す。選択の順序（濃い側から貪欲）とは別。
+    filters.sort((x, y) => x - y);
     const cand = { totalStops: sum, filters, excess: sum - required, count: filters.length };
     if (best === null || isBetter(cand, best)) best = cand;
   }

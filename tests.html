@@ -66,6 +66,8 @@
       daylightSync, slowSyncAmbient, ndCountWarnings, formatStops,
     } from './js/advisor.js';
     import { SUBJECTS, POWER_STEPS } from './js/scenes.js';
+    import { compute } from './js/compute.js';
+    import { makeState } from './js/state.js';
 
     // ---- 判定ヘルパー -------------------------------------------------------
     const rel = (a, b, tol = 0.01) => Math.abs(a - b) <= Math.abs(b) * tol + 1e-9;
@@ -158,10 +160,12 @@
       const ok = r.count === 1 && r.totalStops === 4 && r.excess === 0;
       return { expected: '1枚 / 4段 / 超過0', actual: `${r.count}枚 / ${r.totalStops}段 / 超過${r.excess}`, pass: ok };
     });
-    add(16, 'solveND([1,2,3,4],5) → 2枚 合計5 超過0', () => {
+    add(16, 'solveND([1,2,3,4],5) → ND2+ND16（濃い側から貪欲・解が一意）', () => {
       const r = solveND([1, 2, 3, 4], 5);
-      const ok = r.count === 2 && r.totalStops === 5 && r.excess === 0;
-      return { expected: '2枚 / 5段 / 超過0', actual: `${r.count}枚 / ${r.totalStops}段 / 超過${r.excess}`, pass: ok };
+      // 同枚数の解（ND4+ND8）もあるが、仕様 §6 により濃い側から貪欲に選んだ解に一意化する
+      const ok = r.count === 2 && r.totalStops === 5 && r.excess === 0
+        && r.filters.join('+') === '1+4';
+      return { expected: '2枚 / 5段 / 超過0 / [1,4]', actual: `${r.count}枚 / ${r.totalStops}段 / 超過${r.excess} / [${r.filters}]`, pass: ok };
     });
     add(17, 'solveND([1,2,3,4],8) → 3枚 合計8 + ケラレ警告', () => {
       const r = solveND([1, 2, 3, 4], 8);
@@ -285,6 +289,126 @@
         actual: `2枚:${twoInfo ? 'info' : '×'}/${twoNoKerare ? 'warnなし' : 'warnあり'}, 3枚:${threeInfo ? 'info' : '×'}+${threeKerare ? 'ケラレ' : '×'}`,
         pass: ok,
       };
+    });
+
+    // ======================================================================
+    //  compute(state) 経由の統合テスト（末尾 c = compute を通す）
+    //  純粋関数を直接呼ぶ上の群と違い、意図別ロジック・経路比較・警告の
+    //  「組み立て」まで含めて検証する。ここが赤くなればアプリの表示が誤る。
+    // ======================================================================
+    const F28 = 2 ** (9 / 6);   // F2.8 の厳密値 2.8284
+    const SYNC = 2 ** -8;       // 同調 1/250 の厳密値（1/256）
+
+    /** 日中シンクロの基準状態（仕様 #19〜#23 と同条件）。 */
+    const dayState = (patch = {}) => makeState({
+      intent: 'daylightSync',
+      scene: { evBase: 15, adjust: 0 },
+      camera: { syncSpeed: SYNC, isoMin: 200 },
+      lens: { fMin: F28 },
+      flash: { profileId: 'p2', modifier: 'reflector', distance: 3, ambientOffset: 0 },
+      ...patch,
+    });
+    /** スローシンクロの基準状態。 */
+    const slowState = (patch = {}) => makeState({
+      intent: 'slowSync',
+      subject: 'running',
+      scene: { evBase: 5, adjust: 0 },
+      camera: { isoMin: 400 },
+      lens: { fMin: F28 },
+      flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true },
+      ...patch,
+    });
+
+    add('20c', 'compute 日中: 同調速度の壁 = 5段', () => {
+      const d = compute(dayState());
+      const ok = d.wall != null && rel(d.wall.stops, 5, 0.01);
+      return { expected: '5段', actual: d.wall ? d.wall.stops.toFixed(3) : 'なし', pass: ok };
+    });
+    add('21c', 'compute 日中: ND経路 ND2+ND16 / 到達5.0m', () => {
+      const d = compute(dayState());
+      const p = d.paths.nd;
+      const ok = p && p.nd === 'ND2+ND16' && p.lossStops === 5 && rel(p.reach, 5.0, 0.02);
+      return { expected: 'ND2+ND16 / 5段 / 5.0m', actual: p ? `${p.nd} / ${p.lossStops}段 / ${p.reach.toFixed(2)}m` : 'なし', pass: ok };
+    });
+    add('22c', 'compute 日中: HSS経路 1/8000 / 損失7段 / 到達2.5m', () => {
+      const d = compute(dayState());
+      const p = d.paths.hss;
+      const ok = p && p.ss === '1/8000' && rel(p.lossStops, 7, 0.02) && rel(p.reach, 2.5, 0.02);
+      return { expected: '1/8000 / 7段 / 2.5m', actual: p ? `${p.ss} / ${p.lossStops.toFixed(2)}段 / ${p.reach.toFixed(2)}m` : 'なし', pass: ok };
+    });
+    add('23c', 'compute 日中: 到達比2倍 = ND経路が2段有利（log2 の係数2）', () => {
+      const d = compute(dayState());
+      const ratio = d.paths.nd.reach / d.paths.hss.reach;
+      const adv = d.paths.advantageStops;
+      // 光量は距離の2乗に反比例：比2倍 = 2段。log2(比) だけだと 1段になり半分に見える。
+      const ok = rel(ratio, 2.0, 0.02) && rel(adv, 2.0, 0.02) && /2段有利/.test(d.paths.advantage || '');
+      return { expected: '比2.0 / 2段有利', actual: `比${ratio.toFixed(3)} / ${adv.toFixed(3)}段 "${d.paths.advantage || ''}"`, pass: ok };
+    });
+    add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {
+      const a = compute(slowState({ flash: { profileId: 'p1', distance: 8, ambientOffset: -1, tripod: true } }));
+      const b = compute(slowState({ flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true } }));
+      const stops = 2 * Math.log2(b.flash.reach / a.flash.reach); // 距離の2乗に反比例
+      const ok = rel(stops, 1.0, 0.01) && rel(b.flash.reach / a.flash.reach, Math.SQRT2, 0.01);
+      return { expected: '1.0段（√2倍）', actual: `${stops.toFixed(3)}段（${a.flash.reach.toFixed(1)}m→${b.flash.reach.toFixed(1)}m）`, pass: ok };
+    });
+    add('13c', 'compute: 校正 k=2.333（200Ws→GN33）が到達距離に反映される', () => {
+      const k = 33 / Math.sqrt(200); // 仕様 #13 の校正結果 ≈2.333
+      const base = compute(slowState({ flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true } }));
+      const cal = compute(slowState({
+        flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true },
+        profiles: makeState().profiles.map((p) => (p.id === 'p2' ? { ...p, k, calibrated: true } : p)),
+      }));
+      // GN が k 比（2.333/4.0）になるので到達距離も同じ比になる
+      const ok = rel(cal.flash.reach / base.flash.reach, k / 4.0, 0.01) && cal.uncalibrated === false;
+      return {
+        expected: `比 ${(k / 4).toFixed(3)} / 未校正バッジ無し`,
+        actual: `比 ${(cal.flash.reach / base.flash.reach).toFixed(3)} / uncalibrated=${cal.uncalibrated}`,
+        pass: ok,
+      };
+    });
+    add('24c', 'compute スロー: EV5/ISO400/F2.8/背景−1段 → SS 1/30', () => {
+      const d = compute(slowState());
+      return { expected: '1/30', actual: d.ambient.ssLabel, pass: d.ambient.ssLabel === '1/30' };
+    });
+    add('25c', 'compute スロー: 85mm・三脚なし・ISO余裕なし → 手ブレwarn 約1.4段', () => {
+      const d = compute(slowState({ focal: 85, camera: { isoMin: 400, isoMax: 400 }, flash: { tripod: false, distance: 8, ambientOffset: -1, profileId: 'p2' } }));
+      const w = d.warnings.find((x) => x.icon === 'shake');
+      const ok = w && w.level === 'warn' && /1\.4段/.test(w.message);
+      return { expected: 'warn / 1.4段', actual: w ? `${w.level} / ${w.message}` : 'なし', pass: ok };
+    });
+    add('26c', 'compute スロー: EV変更で SS が変わっても発光量は不変（SS非依存）', () => {
+      const a = compute(slowState());                          // EV5
+      const b = compute(slowState({ scene: { evBase: 8 } }));   // EV8
+      const ssChanged = a.ambient.ssLabel !== b.ambient.ssLabel;
+      const powerSame = a.flash.powerLabel === b.flash.powerLabel;
+      return {
+        expected: 'SS変化 / 発光量同一',
+        actual: `SS ${a.ambient.ssLabel}→${b.ambient.ssLabel} / 発光量 ${a.flash.powerLabel}→${b.flash.powerLabel}`,
+        pass: ssChanged && powerSame,
+      };
+    });
+    add('27c', 'compute スロー: ND8 追加で SS 3段遅く＋発光量 3段強く（両系統に効く）', () => {
+      const a = compute(slowState());
+      const b = compute(slowState({ nd: [3] }));
+      const aIdx = SS.labels.indexOf(a.ambient.ssLabel) + SS.minIndex;
+      const bIdx = SS.labels.indexOf(b.ambient.ssLabel) + SS.minIndex;
+      const ssSlower = (aIdx - bIdx) / 3;                       // index 3 = 1段
+      const aPow = POWER_STEPS.findIndex((p) => p.label === a.flash.powerLabel);
+      const bPow = POWER_STEPS.findIndex((p) => p.label === b.flash.powerLabel);
+      const stronger = aPow - bPow;                             // powerStops が減る = 強くなる
+      const ok = near(ssSlower, 3, 0.01) && stronger === 3;
+      return { expected: 'SS 3段遅く / 発光量 3段強く', actual: `SS ${ssSlower}段 / 発光量 ${stronger}段（${a.flash.powerLabel}→${b.flash.powerLabel}）`, pass: ok };
+    });
+    add('28c', 'compute スロー: フル発光＋走る人 → 閃光時間で止まらないwarn', () => {
+      const d = compute(slowState({ flash: { profileId: 'p1', distance: 20, ambientOffset: -1, tripod: true }, camera: { isoMin: 200 } }));
+      const w = d.warnings.find((x) => /止まりません/.test(x.message));
+      const ok = d.flash.powerLabel === '1/1' && w && w.level === 'warn';
+      return { expected: '発光量1/1 / warn', actual: `${d.flash.powerLabel} / ${w ? w.level : '警告なし'}`, pass: ok };
+    });
+    add('29c', 'compute スロー: 発光量が小さければ止まる（警告なし）', () => {
+      const d = compute(slowState({ flash: { profileId: 'p1', distance: 3, ambientOffset: -1, tripod: true }, camera: { isoMin: 200 } }));
+      const w = d.warnings.find((x) => /止まりません/.test(x.message));
+      return { expected: '警告なし', actual: w ? w.message : '警告なし', pass: !w };
     });
 
     // ---- 実行 & 描画 --------------------------------------------------------

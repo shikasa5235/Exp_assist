@@ -14,6 +14,7 @@ import { SCENES, SUBJECTS, MODIFIERS, POWER_STEPS } from './scenes.js';
 import { F, SS, ISO } from './stops.js';
 import { calibrate } from './flash.js';
 import { makeWheel } from './wheel.js';
+import { defaultState, clone, mergeDeep } from './state.js';
 import * as storage from './storage.js';
 
 /* ---- 選択肢（UI仕様 §3）---------------------------------------------- */
@@ -29,24 +30,6 @@ const FOCALS = [24, 35, 50, 85, 135, 200];
 const DISTANCES = [1, 1.5, 2, 3, 5, 8];
 const AMBIENTS = [-3, -2, -1, 0, 1];
 
-/* ---- 既定状態（実機確定の上書き込み。confirmed-default-overrides）---- */
-export const defaultState = {
-  scene: { key: 'sunny', evBase: 15, adjust: 0 },
-  intent: 'blur',
-  subject: 'walking',
-  focal: 50,
-  camera: { syncSpeed: 1 / 250, maxSS: 1 / 8000, isoMin: 200, isoMax: 6400, isStops: 0, expandedISOMin: 50 },
-  lens: { fMin: 2.8, fMax: 22 },
-  flash: { profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: -1, useHSS: true, tripod: false, curtain: false },
-  nd: [],
-  manual: { fIndex: null, ssIndex: null, isoIndex: null, locks: { f: true, ss: true, iso: false } },
-  profiles: [
-    { id: 'p1', name: '100Ws', ws: 100, k: 4.0, hss: true, minPowerStops: 7, modifier: 'reflector', calibrated: false },
-    { id: 'p2', name: '200Ws', ws: 200, k: 4.0, hss: true, minPowerStops: 7, modifier: 'reflector', calibrated: false },
-  ],
-  settings: { hssBaseLoss: 2.0, ambientOffsetDefault: -1, ownedND: [1, 2, 3, 4], comp: 0 },
-  ui: { tab: 'easy', theme: 'auto', firstRun: true },
-};
 
 /* ---- モジュールスコープの単一状態 ------------------------------------ */
 let state = null;
@@ -285,16 +268,6 @@ function commitOther(kind, input) {
 /* ====================================================================== */
 
 function render() {
-  // TODO(切り分け用・確認後に削除): compute の分岐結果と描画対象を突き合わせる
-  console.log('[render]', {
-    tab: state.ui.tab,
-    intent: state.intent,
-    tracks: derived.ruler?.tracks?.length,
-    series: derived.ruler?.tracks?.map((t) => t.series).join(','),
-    wall: derived.wall,
-    flashOn: derived.flashOn,
-    badges: derived.badges.length,
-  });
   renderTheme();
   renderTabs();
   renderHeader();
@@ -455,16 +428,6 @@ function renderRuler() {
     slot.row.hidden = false;
     slot.cur.textContent = t.cur;
     slot.wheel.setIndex(t.index, { animate: true });
-  });
-  // TODO(切り分け用・確認後に削除)
-  console.log('[ruler]', {
-    called: true,
-    rows: RULER_SERIES.map((s) => `${wheels.ruler[s].row.tagName}.${wheels.ruler[s].row.className}`),
-    showing: r.tracks.map((t) => t.series),
-    powerRowHidden: wheels.ruler.POWER.row.hidden,
-    powerRowDisplay: getComputedStyle(wheels.ruler.POWER.row).display,
-    wallHidden: el.wallReadout.hidden,
-    wallDisplay: getComputedStyle(el.wallReadout).display,
   });
 }
 
@@ -818,15 +781,5 @@ function toast(msg) {
   toastTimer = setTimeout(() => { el.toast.hidden = true; }, 2500);
 }
 
-/* ---- 小道具 ----------------------------------------------------------- */
+/* ---- 小道具（clone / mergeDeep は state.js に集約）------------------- */
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
-function clone(o) { return JSON.parse(JSON.stringify(o)); }
-function isObj(v) { return v && typeof v === 'object' && !Array.isArray(v); }
-/** 2階層までの深いマージ（配列は置換）。 */
-function mergeDeep(base, patch) {
-  const out = Array.isArray(base) ? base.slice() : { ...base };
-  for (const k of Object.keys(patch)) {
-    out[k] = isObj(out[k]) && isObj(patch[k]) ? { ...out[k], ...patch[k] } : patch[k];
-  }
-  return out;
-}
