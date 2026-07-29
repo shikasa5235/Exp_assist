@@ -39,7 +39,7 @@ export const defaultState = {
   lens: { fMin: 2.8, fMax: 22 },
   flash: { profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: -1, useHSS: true, tripod: false, curtain: false },
   nd: [],
-  manual: { fIndex: null, ssIndex: null, isoIndex: null, locks: { f: true, ss: false, iso: true } },
+  manual: { fIndex: null, ssIndex: null, isoIndex: null, locks: { f: true, ss: true, iso: false } },
   profiles: [
     { id: 'p1', name: '100Ws', ws: 100, k: 4.0, hss: true, minPowerStops: 7, modifier: 'reflector', calibrated: false },
     { id: 'p2', name: '200Ws', ws: 200, k: 4.0, hss: true, minPowerStops: 7, modifier: 'reflector', calibrated: false },
@@ -285,6 +285,16 @@ function commitOther(kind, input) {
 /* ====================================================================== */
 
 function render() {
+  // TODO(切り分け用・確認後に削除): compute の分岐結果と描画対象を突き合わせる
+  console.log('[render]', {
+    tab: state.ui.tab,
+    intent: state.intent,
+    tracks: derived.ruler?.tracks?.length,
+    series: derived.ruler?.tracks?.map((t) => t.series).join(','),
+    wall: derived.wall,
+    flashOn: derived.flashOn,
+    badges: derived.badges.length,
+  });
   renderTheme();
   renderTabs();
   renderHeader();
@@ -360,6 +370,7 @@ function setChecked(container, selectedKey) {
 
 function renderResult() {
   const d = derived;
+  // derived を描くだけ。タブは見ない（何を映すかは compute() の入口で解決済み）。
   // 同調速度の壁
   if (d.wall) { el.wallReadout.hidden = false; el.wallNum.textContent = d.wall.text; }
   else { el.wallReadout.hidden = true; }
@@ -422,21 +433,39 @@ function buildRuler() {
   });
 }
 
-function renderRuler() {
-  const r = derived.ruler;
-  if (!r) return;
-  const dev = clamp(r.deviation, -RULER_SPAN, RULER_SPAN);
+function updateScale(deviation) {
+  const dev = clamp(deviation, -RULER_SPAN, RULER_SPAN);
   rulerScaleTrack.style.transform = `translateX(${-((dev * 3 + RULER_COUNT) * RULER_STEP + RULER_STEP / 2)}px)`;
-  rulerClipL.hidden = r.deviation >= -RULER_SPAN; rulerClipL.textContent = `−${RULER_SPAN}.0 ↓`;
-  rulerClipR.hidden = r.deviation <= RULER_SPAN; rulerClipR.textContent = `+${RULER_SPAN}.0 ↑`;
-  const present = {};
+  rulerClipL.hidden = deviation >= -RULER_SPAN; rulerClipL.textContent = `−${RULER_SPAN}.0 ↓`;
+  rulerClipR.hidden = deviation <= RULER_SPAN; rulerClipR.textContent = `+${RULER_SPAN}.0 ↑`;
+}
+
+const RULER_SERIES = ['F', 'SS', 'ISO', 'POWER'];
+
+function renderRuler() {
+  // derived.ruler.tracks を唯一の真実とし、DOM を毎回それに合わせる。
+  // まず全行を隠してから該当行だけ出す（前回の描画が残らないことを構造的に保証する）。
+  RULER_SERIES.forEach((s) => { wheels.ruler[s].row.hidden = true; });
+  const r = derived.ruler;
+  if (!r) { updateScale(0); return; }
+  updateScale(r.deviation);
   r.tracks.forEach((t) => {
-    present[t.series] = true;
     const slot = wheels.ruler[t.series];
-    slot.row.hidden = false; slot.cur.textContent = t.cur;
+    if (!slot) return;
+    slot.row.hidden = false;
+    slot.cur.textContent = t.cur;
     slot.wheel.setIndex(t.index, { animate: true });
   });
-  ['F', 'SS', 'ISO', 'POWER'].forEach((s) => { if (!present[s]) wheels.ruler[s].row.hidden = true; });
+  // TODO(切り分け用・確認後に削除)
+  console.log('[ruler]', {
+    called: true,
+    rows: RULER_SERIES.map((s) => `${wheels.ruler[s].row.tagName}.${wheels.ruler[s].row.className}`),
+    showing: r.tracks.map((t) => t.series),
+    powerRowHidden: wheels.ruler.POWER.row.hidden,
+    powerRowDisplay: getComputedStyle(wheels.ruler.POWER.row).display,
+    wallHidden: el.wallReadout.hidden,
+    wallDisplay: getComputedStyle(el.wallReadout).display,
+  });
 }
 
 /* ====================================================================== */

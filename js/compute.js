@@ -201,12 +201,23 @@ function flashSettings(gnFull, N, distance, minPowerStops) {
 
 /* ---- EV ルーラー用トラック ------------------------------------------- */
 
+/**
+ * 結果パネルのトラック集合を組む。表示本数はここで確定し、ui はこれを描くだけにする。
+ * snapped=null は「F/SS/ISO を出さない」（計算タブ：操作ホイールが同じ役割を担うため重複させない）。
+ * powerStops=null は「発光量を出さない」（ストロボ OFF）。
+ * @param {{f,ss,iso}|null} snapped
+ * @param {number|null} powerStops
+ * @returns {Array<{name:string,cur:string,index:number,series:string,isFlash:boolean}>}
+ */
 function buildTracks(snapped, powerStops) {
-  const tracks = [
-    { name: 'F', cur: snapped.f.label, index: snapped.f.index, series: 'F', isFlash: false },
-    { name: 'SS', cur: snapped.ss.label, index: snapped.ss.index, series: 'SS', isFlash: false },
-    { name: 'ISO', cur: snapped.iso.label, index: snapped.iso.index, series: 'ISO', isFlash: false },
-  ];
+  const tracks = [];
+  if (snapped) {
+    tracks.push(
+      { name: 'F', cur: snapped.f.label, index: snapped.f.index, series: 'F', isFlash: false },
+      { name: 'SS', cur: snapped.ss.label, index: snapped.ss.index, series: 'SS', isFlash: false },
+      { name: 'ISO', cur: snapped.iso.label, index: snapped.iso.index, series: 'ISO', isFlash: false },
+    );
+  }
   if (powerStops != null) {
     tracks.push({ name: '発光', cur: POWER_STEPS[powerStops].label, index: powerStops, series: 'POWER', isFlash: true });
   }
@@ -242,10 +253,31 @@ function equivalentList(ev, st, mainFIndex) {
 
 /* ---- 計算タブ：2ロック→残り1つを自動算出 ---------------------------- */
 
+/**
+ * 自由軸が範囲限界に達して露出を満たせないときの警告。ロックは破らず不足段数を提示する。
+ * @param {'F'|'SS'|'ISO'} axis 限界に達した自由軸
+ * @param {number} stops 不足/超過の段数
+ * @param {'short'|'bright'} kind short=光量不足（上限張り付き）／bright=明るすぎ（下限張り付き）
+ * @param {boolean} hasND ND 装着中か
+ */
+function manualShort(axis, stops, kind, hasND) {
+  const N = formatStops(stops);
+  const inc = { F: `F を ${N}段開ける`, SS: `SS を ${N}段遅くする`, ISO: `ISO を ${N}段上げる` };
+  const dec = { F: `F を ${N}段絞る`, SS: `SS を ${N}段速める`, ISO: `ISO を ${N}段下げる` };
+  const others = ['F', 'SS', 'ISO'].filter((a) => a !== axis);
+  if (kind === 'short') {
+    const axisRem = others.map((a, i) => (i === 0 ? 'ロックを外して ' : '') + inc[a]);
+    const remedies = [hasND ? 'ND を1枚外す' : null, ...axisRem].filter(Boolean);
+    return { level: 'alert', icon: 'alert', message: `${axis} が ${N}段 足りません。${remedies.join('／')}` };
+  }
+  const axisRem = others.map((a, i) => (i === 0 ? 'ロックを外して ' : '') + dec[a]);
+  return { level: 'alert', icon: 'alert', message: `明るすぎます（${N}段超過）。${['ND を足す', ...axisRem].join('／')}` };
+}
+
 function manualResult(ev, st) {
   const { manual, camera, settings, lens } = st;
   const nd = ndStops(st), comp = settings.comp;
-  const L = manual.locks || { f: true, ss: false, iso: true };
+  const L = manual.locks || { f: true, ss: true, iso: false };
   // 非ロック（false）が自動算出される軸。ちょうど1つを想定、無ければ ss。
   const computedKey = ['f', 'ss', 'iso'].find((k) => !L[k]) || 'ss';
   // ロック軸は保存済み index を使い、未確定なら既定値で補完（開放F・ベースISO）。
@@ -256,7 +288,20 @@ function manualResult(ev, st) {
   if (computedKey === 'ss') ssReal = solveSS(ev, isoReal, fReal, comp, nd);
   else if (computedKey === 'iso') isoReal = solveISO(ev, fReal, ssReal, comp, nd);
   else fReal = solveN(ev, isoReal, ssReal, comp, nd);
-  return { ...snapTriple(fReal, ssReal, isoReal), computedKey };
+  // 自由軸が範囲外＝ND等を吸収しきれない。ロックは破らずクランプし不足を警告（仕様の穴埋め）。
+  let warning = null;
+  const hasND = nd > 0;
+  if (computedKey === 'iso') {
+    if (isoReal > camera.isoMax) { warning = manualShort('ISO', Math.log2(isoReal / camera.isoMax), 'short', hasND); isoReal = camera.isoMax; }
+    else if (isoReal < camera.expandedISOMin) { warning = manualShort('ISO', Math.log2(camera.expandedISOMin / isoReal), 'bright', hasND); isoReal = camera.expandedISOMin; }
+  } else if (computedKey === 'ss') {
+    if (ssReal < camera.maxSS) { warning = manualShort('SS', Math.log2(camera.maxSS / ssReal), 'bright', hasND); ssReal = camera.maxSS; }
+    else if (ssReal > SLOWEST) { warning = manualShort('SS', Math.log2(ssReal / SLOWEST), 'short', hasND); ssReal = SLOWEST; }
+  } else {
+    if (fReal < lens.fMin) { warning = manualShort('F', 2 * Math.log2(lens.fMin / fReal), 'short', hasND); fReal = lens.fMin; }
+    else if (fReal > lens.fMax) { warning = manualShort('F', 2 * Math.log2(fReal / lens.fMax), 'bright', hasND); fReal = lens.fMax; }
+  }
+  return { ...snapTriple(fReal, ssReal, isoReal), computedKey, warning };
 }
 
 /* ====================================================================== */
@@ -275,35 +320,64 @@ export function compute(st) {
   const modLoss = modLossOf(st.flash.modifier);
   const d = {
     evScene, flashOn, warnings: [], badges: [],
-    uncalibrated: !prof.calibrated,
+    // 未校正バッジはストロボを使うときだけ意味を持つ（GN 推定に関わるため）。
+    uncalibrated: flashOn && !prof.calibrated,
   };
-  if (!prof.calibrated) d.badges.push({ kind: 'est', text: '推定値（未校正）' });
+  if (d.uncalibrated) d.badges.push({ kind: 'est', text: '推定値（未校正）' });
 
-  if (!flashOn) {
-    // ---- アンビエント意図 ----
-    const raw = AMBIENT_INTENTS[st.intent](evScene, st);
-    const c = clampAmbient(raw, st, evScene);
-    const snapped = snapTriple(c.fReal, c.ssReal, c.isoReal);
-    d.ambient = {
-      fLabel: snapped.f.label, ssLabel: snapped.ss.label, isoLabel: snapped.iso.label,
-      ndLabel: ndLabelOf(st.nd),
-    };
-    d.warnings.push(...c.warnings);
-    d.alternatives = alternatives(evScene, st, { fReal: c.fReal, ssReal: c.ssReal, isoReal: c.isoReal });
-    d.ruler = { deviation: 0, tracks: buildTracks(snapped, null) };
-    d.evSetting = Math.log2(snapped.f.real ** 2 / snapped.ss.real);
-    if (d.warnings.length === 0) d.warnings.push({ level: 'info', icon: 'info', message: 'この設定で撮れます' });
-  } else if (st.intent === 'daylightSync') {
-    computeDaylight(st, evScene, prof, modLoss, d);
-  } else {
-    computeSlow(st, evScene, prof, modLoss, d);
-  }
+  // 入口で「何が F/SS/ISO を決めるか」を一度だけ解決する。
+  //   計算タブ  → state.manual（2ロック＋自動算出）
+  //   それ以外  → 意図ロジック
+  // ここから先の処理と derived の形は共通。結果パネルは derived を描くだけでタブを見ない。
+  if (st.ui.tab === 'calc') computeManual(st, evScene, prof, modLoss, d);
+  else if (!flashOn) computeAmbient(st, evScene, d);
+  else if (st.intent === 'daylightSync') computeDaylight(st, evScene, prof, modLoss, d);
+  else computeSlow(st, evScene, prof, modLoss, d);
 
-  // 計算タブ用（常に用意。描画は ui 側でタブに応じて）
-  d.manual = manualResult(evScene, st);
-  d.equiv = equivalentList(evScene, st, d.ruler ? d.ruler.tracks[0].index : null);
-
+  d.equiv = equivalentList(evScene, st, d.mainFIndex);
+  if (d.warnings.length === 0) d.warnings.push({ level: 'info', icon: 'info', message: 'この設定で撮れます' });
   return d;
+}
+
+/** アンビエント意図（ぼかす／止める／風景／夜手持ち）。 */
+function computeAmbient(st, evScene, d) {
+  const raw = AMBIENT_INTENTS[st.intent](evScene, st);
+  const c = clampAmbient(raw, st, evScene);
+  const snapped = snapTriple(c.fReal, c.ssReal, c.isoReal);
+  d.ambient = {
+    fLabel: snapped.f.label, ssLabel: snapped.ss.label, isoLabel: snapped.iso.label,
+    ndLabel: ndLabelOf(st.nd),
+  };
+  d.mainFIndex = snapped.f.index;
+  d.warnings.push(...c.warnings);
+  d.alternatives = alternatives(evScene, st, { fReal: c.fReal, ssReal: c.ssReal, isoReal: c.isoReal });
+  d.ruler = { deviation: 0, tracks: buildTracks(snapped, null) };
+  d.evSetting = Math.log2(snapped.f.real ** 2 / snapped.ss.real);
+}
+
+/**
+ * 計算タブ：state.manual が F/SS/ISO を決める。結果パネルの数値2系統もこれを映すので
+ * 上段の操作ホイールと食い違わない。トラックは発光量のみ（F/SS/ISO は操作ホイールと重複するため出さない）。
+ */
+function computeManual(st, evScene, prof, modLoss, d) {
+  const m = manualResult(evScene, st);
+  d.manual = m;
+  d.mainFIndex = m.f.index;
+  d.ambient = {
+    fLabel: m.f.label, ssLabel: m.ss.label, isoLabel: m.iso.label, ndLabel: ndLabelOf(st.nd),
+  };
+  if (m.warning) d.warnings.push(m.warning);
+  let powerStops = null;
+  if (d.flashOn) {
+    // ストロボ側は SS に依存しない。manual の F/ISO と ND・距離だけで決まる。
+    const gnFull = effectiveGN(applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), m.iso.real), 0, ndStops(st), 0);
+    const fs = flashSettings(gnFull, m.f.real, st.flash.distance, prof.minPowerStops);
+    d.flash = flashCard(fs, st.flash.distance, d.uncalibrated, 'manual');
+    flashRangeWarnings(fs, st.flash.distance, d);
+    powerStops = fs.powerStops;
+  }
+  d.ruler = { deviation: 0, tracks: buildTracks(null, powerStops) };
+  d.evSetting = Math.log2(m.f.real ** 2 / m.ss.real);
 }
 
 /** 日中シンクロ。ND経路とHSS経路を両方組み立てる。仕様 §8.1 */
@@ -360,7 +434,7 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   }
 
   d.ruler = { deviation: 0, tracks: buildTracks(ambSnap, powerStops) };
-  if (d.warnings.length === 0) d.warnings.push({ level: 'info', icon: 'info', message: 'この設定で撮れます' });
+  d.mainFIndex = ambSnap.f.index;
 }
 
 /** スローシンクロ。閃光時間で主被写体が止まるか判定。仕様 §8.2 */
@@ -409,7 +483,7 @@ function computeSlow(st, evScene, prof, modLoss, d) {
   }
 
   d.ruler = { deviation: 0, tracks: buildTracks(ambSnap, fs.powerStops) };
-  if (d.warnings.length === 0) d.warnings.push({ level: 'info', icon: 'info', message: 'この設定で撮れます' });
+  d.mainFIndex = ambSnap.f.index;
 }
 
 /** ストロボ側カードの表示オブジェクト。 */

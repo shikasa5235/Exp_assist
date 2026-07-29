@@ -62,6 +62,9 @@
 
 /* ---- リセット ----------------------------------------------------- */
 * { box-sizing: border-box; }
+/* hidden 属性を常に効かせる。クラス側の display 指定（flex/grid など）は
+   UA 既定の [hidden]{display:none} より詳細度が高く、これが無いと非表示にならない。 */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -227,10 +230,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 
 /* ===== ホイールピッカー（EVルーラーのトラックと同一）============= */
 .wheel {
-  position: relative; height: 56px; overflow: hidden;
+  position: relative; height: 64px; overflow: hidden;
   border: 1px solid var(--rule); border-radius: var(--r-chip); background: var(--panel);
   touch-action: pan-y; user-select: none; -webkit-user-select: none;
 }
+.wheel.is-readonly { opacity: .95; }
 .wheel-track {
   position: absolute; top: 0; bottom: 0; left: 50%; display: flex; align-items: center;
   will-change: transform;
@@ -254,7 +258,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .wheel-edge { box-shadow: inset 0 0 0 2px var(--rule); }
 /* トラック（結果パネル内・ラベル付き） */
-.track-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin-bottom: 6px; }
+.track-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin-bottom: 8px; }
 .track-lock {
   display: flex; align-items: center; justify-content: center; width: var(--tap-min); height: var(--tap-min);
   color: var(--ink-2); border-radius: var(--r-chip);
