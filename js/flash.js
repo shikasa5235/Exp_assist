@@ -128,6 +128,37 @@ export function resolvePower(over, opts = {}) {
 }
 
 /**
+ * 固定発光量から「推奨距離」を解く。距離はストロボにだけ効き、背景の明るさを変えないため、
+ * 発光量を固定したときに動かすべき唯一の軸（F や ISO を動かすと背景まで変わる）。仕様 §5.3。
+ * @param {{gnIso:number,N:number,powerStops?:number,ndStops?:number,hssLossStops?:number}} p
+ * @returns {{gnEff:number,distance:number}} distance はストロボ→被写体(m)
+ */
+export function solveDistance({ gnIso, N, powerStops = 0, ndStops = 0, hssLossStops = 0 }) {
+  const gnEff = effectiveGN(gnIso, powerStops, ndStops, hssLossStops);
+  return { gnEff, distance: gnEff / N };
+}
+
+/**
+ * 発光量の上限（強い側）を尊重して発光量を決める。上限より強い側は主案にしない。
+ * @param {number} over 過剰段数（overStops の戻り値。正なら光が強すぎる＝絞れる段数）
+ * @param {{ceilingStops?:number,minPowerStops?:number}} limits
+ *   ceilingStops = 強い側の限界（3 = 1/8）／minPowerStops = 弱い側の限界（7 = 1/128）
+ * @returns {{powerStops:number,fec:number,shortStops:number,excessStops:number}}
+ *   shortStops>0 は上限に当たって光量が足りない分、excessStops>0 は最小発光量でも強すぎる分
+ */
+export function resolvePowerWithCeiling(over, limits = {}) {
+  const { ceilingStops = 0, minPowerStops = 7 } = limits;
+  const rounded = Math.round(over);
+  const powerStops = Math.max(ceilingStops, Math.min(minPowerStops, rounded));
+  return {
+    powerStops,
+    fec: over - powerStops,
+    shortStops: Math.max(0, ceilingStops - over),   // 上限のほうが弱い＝光が足りない
+    excessStops: Math.max(0, over - minPowerStops), // 最小発光量でも強すぎる
+  };
+}
+
+/**
  * 発光量に対応する閃光時間の目安（秒）。仕様 §5.5 / §7.6。
  * @param {number} powerStops フル発光からの段数(0..7)
  * @returns {number|null} 閃光時間(秒)。範囲外は null

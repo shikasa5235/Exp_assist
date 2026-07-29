@@ -15,12 +15,20 @@ export const defaultState = {
   focal: 50,
   camera: { syncSpeed: 1 / 250, maxSS: 1 / 8000, isoMin: 200, isoMax: 6400, isStops: 0, expandedISOMin: 50 },
   lens: { fMin: 2.8, fMax: 22 },
-  flash: { profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: -1, useHSS: true, tripod: false, curtain: false },
+  // powerMode: 'auto' = 発光量を計算で決める（従属変数）／'fixed' = ユーザーが選び「距離」を解く。
+  // powerStops は fixed のときだけ使う（0=1/1 … 7=1/128。大きいほど弱い）。
+  flash: {
+    profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: -1,
+    useHSS: true, tripod: false, curtain: false,
+    powerMode: 'auto', powerStops: 5,
+  },
   nd: [],
   manual: { fIndex: null, ssIndex: null, isoIndex: null, locks: { f: true, ss: true, iso: false } },
+  // minPowerStops = 弱い側の限界（7 = 1/128）。powerCeilingStops = 強い側の限界（3 = 1/8）。
+  // 段数は 1/1=0 … 1/128=7 なので、上限（強い側）のほうが数値は小さい。取り違えないこと。
   profiles: [
-    { id: 'p1', name: '100Ws', ws: 100, k: 4.0, hss: true, minPowerStops: 7, modifier: 'reflector', calibrated: false },
-    { id: 'p2', name: '200Ws', ws: 200, k: 4.0, hss: true, minPowerStops: 7, modifier: 'reflector', calibrated: false },
+    { id: 'p1', name: '100Ws', ws: 100, k: 4.0, hss: true, minPowerStops: 7, powerCeilingStops: 3, modifier: 'reflector', calibrated: false },
+    { id: 'p2', name: '200Ws', ws: 200, k: 4.0, hss: true, minPowerStops: 7, powerCeilingStops: 3, modifier: 'reflector', calibrated: false },
   ],
   settings: { hssBaseLoss: 2.0, ambientOffsetDefault: -1, ownedND: [1, 2, 3, 4], comp: 0 },
   ui: { tab: 'easy', theme: 'auto', firstRun: true },

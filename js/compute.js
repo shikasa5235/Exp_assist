@@ -6,6 +6,7 @@ import { F, SS, ISO, snap } from './stops.js';
 import { evTarget, solveSS, solveN, solveISO, handShakeLimit } from './exposure.js';
 import {
   gnBase, applyModifier, applyIso, effectiveGN, overStops, resolvePower, flashDuration,
+  solveDistance, resolvePowerWithCeiling,
 } from './flash.js';
 import {
   shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning,
@@ -197,6 +198,84 @@ function flashSettings(gnFull, N, distance, minPowerStops) {
     powerStops, powerLabel: POWER_STEPS[powerStops].label, fec, over,
     reach: gnFull / N, durationReal: dur, durationLabel: snap(SS, dur).label,
   };
+}
+
+/* ---- ストロボ側の解決（発光量モード）。仕様 §5.3 -------------------- */
+
+/**
+ * ストロボ側を解決する。auto は発光量を解き、fixed は距離を解く。
+ * どちらのモードでも SS には依存しない（ストロボは SS に効かない）。
+ * @param {object} st 状態
+ * @param {object} prof 使用プロファイル
+ * @param {number} gnIso ISO 反映後の GN（ND・HSS・発光量はまだ引いていない）
+ * @param {number} N F値（厳密値）
+ * @param {number} ndTotal ND 減光段数
+ * @param {number} hssLossStops HSS 損失段数
+ * @param {object} d derived（警告を積む）
+ * @returns {{powerStops:number,card:object}}
+ */
+function resolveFlashSide(st, prof, gnIso, N, ndTotal, hssLossStops, d) {
+  const { flash } = st;
+  const ceiling = prof.powerCeilingStops ?? 0;
+  const minPower = prof.minPowerStops ?? 7;
+  const setDistance = flash.distance;
+  const fixed = flash.powerMode === 'fixed';
+
+  // 発光量：fixed はユーザー選択（上限・下限でクランプ）、auto は必要量から決める
+  const gnFull = effectiveGN(gnIso, 0, ndTotal, hssLossStops);
+  const over = overStops(gnFull, N, setDistance);
+  let powerStops, fec, shortStops = 0, excessStops = 0;
+  if (fixed) {
+    powerStops = Math.max(ceiling, Math.min(minPower, flash.powerStops));
+    fec = 0; // 距離を解くので端数は距離側に寄せる
+  } else {
+    ({ powerStops, fec, shortStops, excessStops } = resolvePowerWithCeiling(over, { ceilingStops: ceiling, minPowerStops: minPower }));
+  }
+
+  // 推奨距離（fixed の主出力）。距離は背景に影響しないので安全に動かせる軸。
+  const { gnEff, distance: recommended } = solveDistance({ gnIso, N, powerStops, ndStops: ndTotal, hssLossStops });
+  const duration = flashDuration(powerStops);
+  const powerLabel = POWER_STEPS[powerStops].label;
+
+  if (fixed) {
+    // 過剰決定：距離も固定されている → 過不足を段数で出す。自動でどちらも変えない。
+    const diff = 2 * Math.log2(recommended / setDistance); // 正なら設定距離が近すぎ＝強すぎ
+    if (Math.abs(diff) >= THIRD_STOP) {
+      const n = formatStops(Math.abs(diff));
+      const dTxt = recommended.toFixed(1);
+      d.warnings.push(diff > 0
+        ? { level: 'warn', icon: 'flash', message: `発光量 ${powerLabel} では ${n}段 強すぎます。${dTxt}m まで下がる／F を ${n}段絞る／ISO を ${n}段下げる` }
+        : { level: 'warn', icon: 'flash', message: `発光量 ${powerLabel} では ${n}段 足りません。${dTxt}m まで詰める／F を ${n}段開ける／ISO を ${n}段上げる` });
+    }
+  } else {
+    // auto が上限に当たった：黙って丸めず不足段数と代替案を出す
+    if (shortStops >= THIRD_STOP) {
+      const n = formatStops(shortStops);
+      const dTxt = recommended.toFixed(1);
+      const remedies = [`距離を ${dTxt}m まで詰める`, `ISO を ${n}段上げる`];
+      if (ndTotal > 0) remedies.push('ND を1枚外す');
+      d.warnings.push({ level: 'alert', icon: 'flash',
+        message: `上限 ${powerLabel} では ${n}段 足りません。${remedies.join('／')}` });
+    }
+    if (excessStops >= THIRD_STOP) {
+      d.warnings.push({ level: 'warn', icon: 'flash',
+        message: `最小発光量 ${powerLabel} でも ${formatStops(excessStops)}段 強すぎます。距離を ${recommended.toFixed(1)}m まで離すか ISO を下げてください` });
+    }
+  }
+
+  const fecText = Math.abs(fec) < 0.05 ? '' : `FEC ${fec > 0 ? '−' : '＋'}${Math.abs(fec).toFixed(1)}`;
+  const card = {
+    powerLabel, powerStops, fecText, mode: flash.powerMode,
+    reach: gnEff / N,          // 選んだ発光量での到達距離
+    reachFull: gnFull / N,     // フル発光時の到達（機材の能力比較用）
+    recommendedDistance: recommended,
+    reachText: fixed
+      ? `推奨距離 ${recommended.toFixed(1)}m（設定 ${setDistance}m）`
+      : `到達 ${(gnEff / N).toFixed(1)}m（設定 ${setDistance}m）`,
+    durationLabel: snap(SS, duration).label, durationReal: duration,
+    uncalibrated: d.uncalibrated, over,
+  };
+  return { powerStops, card };
 }
 
 /* ---- EV ルーラー用トラック ------------------------------------------- */
@@ -395,11 +474,10 @@ function computeManual(st, evScene, prof, modLoss, d) {
   let powerStops = null;
   if (d.flashOn) {
     // ストロボ側は SS に依存しない。manual の F/ISO と ND・距離だけで決まる。
-    const gnFull = effectiveGN(applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), m.iso.real), 0, ndStops(st), 0);
-    const fs = flashSettings(gnFull, m.f.real, st.flash.distance, prof.minPowerStops);
-    d.flash = flashCard(fs, st.flash.distance, d.uncalibrated, 'manual');
-    flashRangeWarnings(fs, st.flash.distance, d);
-    powerStops = fs.powerStops;
+    const gnIso = applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), m.iso.real);
+    const r = resolveFlashSide(st, prof, gnIso, m.f.real, ndStops(st), 0, d);
+    d.flash = r.card;
+    powerStops = r.powerStops;
   }
   d.ruler = { deviation: 0, tracks: buildTracks(null, powerStops) };
   d.evSetting = Math.log2(m.f.real ** 2 / m.ss.real);
@@ -435,12 +513,15 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   let powerStops = null;
   d.paths = { nd: null, hss: null };
   if (dp.ndPath) {
-    const fs = flashSettings(dp.ndPath.gnEff, desiredN, flash.distance, prof.minPowerStops);
-    powerStops = fs.powerStops;
-    d.flash = flashCard(fs, flash.distance, d.uncalibrated, 'nd');
-    flashRangeWarnings(fs, flash.distance, d);
+    // ND 経路を主案として、発光量モードに応じて発光量 or 距離を解く
+    const gnIso = applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), camera.isoMin);
+    const r = resolveFlashSide(st, prof, gnIso, desiredN, dp.ndPath.totalStops, 0, d);
+    powerStops = r.powerStops;
+    d.flash = r.card;
+    // 経路比較の到達距離は「その経路のフル発光時の能力」。選んだ発光量では変えない
+    // （発光量を絞れば到達は設定距離に近づくので、経路の優劣が比較できなくなる）。
     d.paths.nd = { ss: snap(SS, camera.syncSpeed).label, nd: ndPathLabel || '—',
-      power: fs.powerLabel, reach: fs.reach, lossStops: dp.ndPath.totalStops };
+      power: r.card.powerLabel, reach: dp.ndPath.gnEff / desiredN, lossStops: dp.ndPath.totalStops };
   }
   if (dp.hssPath) {
     const fs = flashSettings(dp.hssPath.gnEff, desiredN, flash.distance, prof.minPowerStops);
@@ -492,52 +573,24 @@ function computeSlow(st, evScene, prof, modLoss, d) {
     ndLabel: ndLabelOf(st.nd), offset: flash.ambientOffset,
   };
 
-  // ストロボ側
-  const gnFull = effectiveGN(applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), iso), 0, nd, 0);
-  const fs = flashSettings(gnFull, desiredN, flash.distance, prof.minPowerStops);
-  d.flash = flashCard(fs, flash.distance, d.uncalibrated, 'slow');
-  flashRangeWarnings(fs, flash.distance, d);
+  // ストロボ側（発光量モードに応じて発光量 or 距離を解く。SS には依存しない）
+  const gnIso = applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), iso);
+  const { powerStops, card } = resolveFlashSide(st, prof, gnIso, desiredN, nd, 0, d);
+  d.flash = card;
 
   // 閃光時間で主被写体が止まるか（止めているのはSSでなく閃光時間）
-  const fw = freezeWarning(fs.durationReal, subjectSSOf(subject));
+  const fw = freezeWarning(card.durationReal, subjectSSOf(subject));
   if (fw) d.warnings.push(fw);
 
   // 後幕シンクロ推奨（SS < 1/60）
   if (amb.ssReal > 1 / 60) {
     d.warnings.push({ level: 'info', icon: 'info', message: '後幕シンクロ推奨。被写体が動くと残像が出ます' });
   }
-  if (fs.powerStops === 0) {
+  if (powerStops === 0) {
     d.warnings.push({ level: 'info', icon: 'flash', message: 'フル発光に近く、連写ではチャージが追いつきません' });
   }
 
-  d.ruler = { deviation: 0, tracks: buildTracks(ambSnap, fs.powerStops) };
+  d.ruler = { deviation: 0, tracks: buildTracks(ambSnap, powerStops) };
   d.mainFIndex = ambSnap.f.index;
 }
 
-/** ストロボ側カードの表示オブジェクト。 */
-function flashCard(fs, distance, uncalibrated, path) {
-  // FEC は残差の逆補正：残りが過強(fec>0)なら −、過弱なら ＋。
-  const fecText = Math.abs(fs.fec) < 0.05 ? '' : `FEC ${fs.fec > 0 ? '−' : '＋'}${Math.abs(fs.fec).toFixed(1)}`;
-  return {
-    powerLabel: fs.powerLabel, fecText, path,
-    reach: fs.reach, // 数値（テスト・比較用）。表示は reachText を使う
-    reachText: `到達 ${fs.reach.toFixed(1)}m（設定 ${distance}m）`,
-    durationLabel: fs.durationLabel, uncalibrated,
-  };
-}
-
-/** ストロボの到達・発光量レンジ警告。仕様 §9 ストロボ系。 */
-function flashRangeWarnings(fs, distance, d) {
-  if (fs.reach < distance) {
-    d.warnings.push({ level: 'alert', icon: 'flash',
-      message: `光が届きません（到達 ${fs.reach.toFixed(1)}m／設定 ${distance}m）` });
-  }
-  if (fs.over < 0) { // 光量不足
-    d.warnings.push({ level: 'alert', icon: 'flash',
-      message: `ストロボが${formatStops(-fs.over)}段足りません。距離を詰める／ISOを上げる／Fを開ける／NDを外す` });
-  }
-  if (fs.fec > 0.05 && fs.powerStops >= 7) { // 最小発光量でも強すぎる
-    d.warnings.push({ level: 'warn', icon: 'flash',
-      message: `光が強すぎます。距離を離すか ISO を下げてください（FEC ${fs.fec.toFixed(1)}段）` });
-  }
-}

@@ -67,6 +67,7 @@ function cacheElements() {
     'curtain-field', 'curtain-toggle', 'result-panel', 'wall-readout', 'wall-num',
     'result-badges', 'ev-ruler', 'result-systems', 'path-compare', 'warnings', 'toast',
     'calc-ev', 'calc-ev-err', 'calc-nd-chips', 'calc-tracks', 'equiv-list', 'settings-root',
+    'power-chips', 'power-hint',
   ];
   ids.forEach((id) => { el[id.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = document.getElementById(id); });
   el.tabButtons = Array.from(document.querySelectorAll('.tab'));
@@ -121,11 +122,38 @@ function buildStaticDom() {
   el.distanceChips.parentElement.append(el.distanceOther);
   // アンビエント目標段数チップ
   el.ambientChips.append(...AMBIENTS.map((a) => chipEl(String(a), a > 0 ? `+${a}` : `${a}`)));
+  // 発光量チップ（おまかせ＝auto。選択肢はプロファイルの最小発光量で絞る）
+  buildPowerChips();
   // EV ルーラー（永続DOM）・計算タブ・設定タブ
   buildRuler();
   buildCalcNd();
   buildCalcTracks();
   buildSettings();
+}
+
+/** 発光量チップの選択肢：おまかせ＋ 1/8〜1/128（プロファイルの最小発光量まで）。 */
+const POWER_CHOICES = [3, 4, 5, 6, 7]; // 1/8, 1/16, 1/32, 1/64, 1/128
+let powerChipSig = null;
+
+function buildPowerChips() {
+  el.powerChips.addEventListener('click', (e) => {
+    const c = e.target.closest('[data-key]'); if (!c) return;
+    const key = c.dataset.key;
+    if (key === 'auto') setState({ flash: { powerMode: 'auto' } });
+    else setState({ flash: { powerMode: 'fixed', powerStops: Number(key) } });
+  });
+}
+
+/** プロファイル変更で選択肢が変わるので、必要になったら組み直す。 */
+function rebuildPowerChipsIfNeeded() {
+  const prof = state.profiles.find((p) => p.id === state.flash.profileId) || state.profiles[0];
+  const sig = `${prof.minPowerStops}`;
+  if (sig === powerChipSig) return;
+  powerChipSig = sig;
+  el.powerChips.innerHTML = '';
+  el.powerChips.append(chipEl('auto', 'おまかせ'));
+  POWER_CHOICES.filter((s) => s <= prof.minPowerStops)
+    .forEach((s) => el.powerChips.append(chipEl(String(s), POWER_STEPS[s].label)));
 }
 
 /* ---- 要素ファクトリ --------------------------------------------------- */
@@ -306,6 +334,10 @@ function renderTab1() {
   setChecked(el.focalChips, FOCALS.includes(state.focal) ? String(state.focal) : '__other__');
   setChecked(el.distanceChips, DISTANCES.includes(state.flash.distance) ? String(state.flash.distance) : '__other__');
   setChecked(el.ambientChips, String(state.flash.ambientOffset));
+  // 発光量チップ（おまかせ／固定）と、fixed のときの推奨距離の目印
+  rebuildPowerChipsIfNeeded();
+  setChecked(el.powerChips, state.flash.powerMode === 'auto' ? 'auto' : String(state.flash.powerStops));
+  renderPowerHint();
 
   // 微調整スライダー（state[段] → DOM[1/3段単位] の逆変換。Math.round で旧データの端数もグリッドへ戻す）
   el.sceneAdjust.value = String(Math.round(state.scene.adjust * 3));
@@ -328,6 +360,25 @@ function renderTab1() {
   el.tripodField.hidden = !showSlow;
   el.curtainField.hidden = !showSlow;
   el.uncalibratedBadge.hidden = !derived.uncalibrated;
+}
+
+/**
+ * 発光量の補助表示：固定時は推奨距離を出し、距離チップの該当値に目印を付ける。
+ * 数値は derived（compute の結果）を読むだけで、ここでは計算しない。
+ */
+function renderPowerHint() {
+  const f = derived.flash;
+  const fixed = state.flash.powerMode === 'fixed';
+  el.powerHint.textContent = fixed && f
+    ? `推奨距離 ${f.recommendedDistance.toFixed(1)}m`
+    : (f ? `おまかせ：${f.powerLabel}` : '');
+  // 距離チップの目印（推奨距離に最も近いプリセット）
+  const near = fixed && f
+    ? DISTANCES.reduce((a, b) => (Math.abs(b - f.recommendedDistance) < Math.abs(a - f.recommendedDistance) ? b : a))
+    : null;
+  el.distanceChips.querySelectorAll('[data-key]').forEach((c) => {
+    c.classList.toggle('is-suggested', near != null && c.dataset.key === String(near));
+  });
 }
 
 /** ラジオグループの aria-checked と roving tabindex を state から更新。 */
@@ -619,7 +670,8 @@ function profileCard(p, i) {
     <div class="set-row"><label>名称</label><input class="input" data-pfield="name" type="text" value="${p.name}"></div>
     <div class="set-row"><label>出力(Ws)</label><input class="input" data-pfield="ws" type="text" inputmode="decimal" value="${p.ws}"></div>
     <div class="set-row"><label>機材係数 k</label><input class="input" data-pfield="k" type="text" inputmode="decimal" value="${p.k}"></div>
-    <div class="set-row"><label>最小発光量 (1/x)</label><input class="input" data-pfield="minPower" type="text" inputmode="decimal" value="${2 ** p.minPowerStops}"></div>
+    <div class="set-row"><label>最小発光量 (1/x)<br><span class="caption">弱い側の限界</span></label><input class="input" data-pfield="minPower" type="text" inputmode="decimal" value="${2 ** p.minPowerStops}"></div>
+    <div class="set-row"><label>発光量の上限 (1/x)<br><span class="caption">強い側の限界。おまかせでもこれより強くしない</span></label><input class="input" data-pfield="powerCeiling" type="text" inputmode="decimal" value="${2 ** (p.powerCeilingStops ?? 0)}"></div>
     <div class="toggle-field"><span class="field-label">HSS 対応</span>
       <button type="button" class="toggle" data-pfield="hss" role="switch" aria-checked="${p.hss}" aria-label="HSS対応"><span class="toggle-knob"></span></button></div>`;
   const cal = document.createElement('button');
@@ -644,6 +696,11 @@ function onProfileChange(e, i) {
   if (f === 'ws') updateProfile(i, { ws: clamp(Math.round(raw), 10, 2000) });
   else if (f === 'k') updateProfile(i, { k: clamp(raw, 2.0, 6.0) });
   else if (f === 'minPower') updateProfile(i, { minPowerStops: clamp(Math.round(Math.log2(raw)), 0, 10) });
+  // 上限は「強い側」なので段数は小さい。1/1=0 〜 最小発光量の段数まで
+  else if (f === 'powerCeiling') {
+    const prof = state.profiles[i];
+    updateProfile(i, { powerCeilingStops: clamp(Math.round(Math.log2(raw)), 0, prof.minPowerStops) });
+  }
 }
 
 /** プロファイル配列の1件を更新（配列は置換）。 */
@@ -714,6 +771,7 @@ function renderSettings() {
     const i = Number(card.dataset.pidx); const p = state.profiles[i]; if (!p) return;
     setInputVal(card, 'name', p.name); setInputVal(card, 'ws', p.ws); setInputVal(card, 'k', p.k);
     setInputVal(card, 'minPower', 2 ** p.minPowerStops);
+    setInputVal(card, 'powerCeiling', 2 ** (p.powerCeilingStops ?? 0));
     card.querySelector('[data-pfield="hss"]').setAttribute('aria-checked', String(p.hss));
   });
   const owned = el.settingsRoot.querySelector('#owned-nd-chips');

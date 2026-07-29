@@ -54,12 +54,16 @@
 │   ├─ main.js               初期化 + SW 登録のみ
 │   ├─ stops.js         [純] 1/3段テーブル生成と丸め
 │   ├─ exposure.js      [純] アンビエント露出ソルバー
-│   ├─ flash.js         [純] Ws→GN・校正・HSS・閃光時間
+│   ├─ flash.js         [純] Ws→GN・校正・HSS・閃光時間・距離の逆算
 │   ├─ filters.js       [純] ND 組み合わせ探索
 │   ├─ advisor.js       [純] 意図別ロジック・警告・代替案
+│   ├─ compute.js       [純] compute(state)→derived。上の純粋モジュールを束ねる層
 │   ├─ scenes.js        [定] シーンEV・各種係数テーブル
+│   ├─ state.js         [純] 既定状態と makeState/clone/mergeDeep（値は保持しない）
+│   ├─ wheel.js             横ホイールピッカー（操作用と表示用で共有・状態を持たない DOM 部品）
 │   ├─ storage.js            localStorage ラッパー
-│   └─ ui.js                 DOM 描画とイベント
+│   └─ ui.js                 単一 state・DOM 描画・イベント
+├─ tools/check-modules       import/export 整合の検査（bash tools/check-modules）
 ├─ icons/                    PWA アイコン 4種
 └─ docs/                     仕様書 4種
 ```
@@ -67,14 +71,21 @@
 `[純]` = 副作用ゼロの純粋関数のみ。DOM・`localStorage`・`window` に触らない。
 `[定]` = 定数のみ。ロジックを持たない。
 
+**呼び出しの向き：** `ui.js` → `compute.js` → `advisor.js` → `exposure`/`flash`/`filters`/`stops`/`scenes`。
+`flash.js` などの計算モジュールは **`compute.js` 経由で使われる**のが原則で、`ui.js` から直接呼ぶのは
+`stops`（表示ラベル）と `flash.calibrate()`（校正）だけ。ここを崩すと計算が2箇所に散る。
+
 ### 触るときの影響範囲
 
 | ファイル | 変えると影響する先 | 注意 |
 | --- | --- | --- |
-| `stops.js` | **全計算** | インデックス体系を変えると保存済み `manual.fIndex` 等が無効になる |
+| `stops.js` | **全計算**（`compute.js` 経由で全画面） | インデックス体系を変えると保存済み `manual.fIndex` 等が無効になる |
 | `scenes.js` | 計算結果・マニュアル本文 | 表の数値を変えたらマニュアル §3/§9/§10 の記述も合わせる |
-| `advisor.js` | 警告・マニュアルの導線 | 警告を追加したら `helpId` も必ず付ける（§8） |
-| `flash.js` | ストロボ計算・ユーザーの校正値 | 推定式を変えると**既存の校正値の意味が変わる**（§9） |
+| `advisor.js` | 警告・マニュアルの導線（`compute.js` 経由） | 警告を追加したら `helpId` も必ず付ける（§8） |
+| `flash.js` | ストロボ計算・ユーザーの校正値（`compute.js` 経由。例外は `ui.js` の校正呼び出し） | 推定式を変えると**既存の校正値の意味が変わる**（§9） |
+| `compute.js` | **結果パネル・3タブの表示すべて** | `derived` の形を変えたら `ui.js` の描画と `tests.html` の統合テストが連動する。タブ分岐は入口の1箇所だけに置く |
+| `state.js` | 既定値・保存データ・テストの前提 | 既定値を変えると保存済み state とずれる（§9 のマイグレーション）。`makeState()` は `tests.html` も使う |
+| `wheel.js` | 計算タブの操作ホイールと結果パネルのトラック | 両者は同一部品。片方だけ直すと挙動が食い違う |
 | `css/style.css` | 全画面 | トークン以外に生の hex を書かない |
 | `sw.js` | **更新の配信そのもの** | §6 を必ず読む |
 | `index.html` | 全部 + プリキャッシュ対象 | ファイルを追加したら `sw.js` のリストにも足す（§6） |

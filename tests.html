@@ -305,18 +305,96 @@
       scene: { evBase: 15, adjust: 0 },
       camera: { syncSpeed: SYNC, isoMin: 200 },
       lens: { fMin: F28 },
+      profiles: makeState().profiles.map((p) => ({ ...p, powerCeilingStops: 0 })),
       flash: { profileId: 'p2', modifier: 'reflector', distance: 3, ambientOffset: 0 },
       ...patch,
     });
-    /** スローシンクロの基準状態。 */
+    /**
+     * スローシンクロの基準状態。
+     * 発光量の上限（既定 1/8）は物理の検証を妨げるため、ここでは 0（1/1 まで許可）にする。
+     * 上限そのものの検証は #37 で行う。
+     */
+    const noCeiling = () => makeState().profiles.map((p) => ({ ...p, powerCeilingStops: 0 }));
     const slowState = (patch = {}) => makeState({
       intent: 'slowSync',
       subject: 'running',
       scene: { evBase: 5, adjust: 0 },
       camera: { isoMin: 400 },
       lens: { fMin: F28 },
+      profiles: noCeiling(),
       flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true },
       ...patch,
+    });
+
+    // ===== 発光量モード（#34〜#37）==========================================
+    // 共通前提：200Ws / k=2.33（校正済み）/ 標準リフレクター / ISO200 / F2.8 / ND なし
+    //   GN_base = 2.33×√200 = 32.95 ／ GN_iso = 32.95×√2 = 46.60
+    const K233 = 2.33;
+    const powerState = (patch = {}) => makeState({
+      intent: 'slowSync',
+      subject: 'static',
+      scene: { evBase: 5, adjust: 0 },
+      camera: { isoMin: 200 },
+      lens: { fMin: F28 },
+      profiles: makeState().profiles.map((p) => (p.id === 'p2'
+        ? { ...p, k: K233, calibrated: true, powerCeilingStops: 3, minPowerStops: 7 } : p)),
+      flash: { profileId: 'p2', modifier: 'reflector', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'fixed', powerStops: 5 },
+      ...patch,
+    });
+
+    add(34, '発光量 1/32 固定 → 推奨距離 約2.9m（距離を解く）', () => {
+      const d = compute(powerState());
+      const gnIso = K233 * Math.sqrt(200) * Math.SQRT2;      // 46.60
+      const expect = (gnIso * 2 ** (-5 / 2)) / F28;          // 8.238 / 2.8284 = 2.91
+      const ok = rel(d.flash.recommendedDistance, expect, 0.01) && rel(expect, 2.91, 0.01)
+        && d.flash.powerLabel === '1/32' && d.flash.mode === 'fixed';
+      return {
+        expected: `推奨距離 ${expect.toFixed(2)}m / 1/32`,
+        actual: `${d.flash.recommendedDistance.toFixed(2)}m / ${d.flash.powerLabel} / ${d.flash.mode}`,
+        pass: ok,
+      };
+    });
+    add(35, '#34 で距離 1.5m 固定（過剰決定）→ 約1.9段 強すぎ＋3案', () => {
+      const d = compute(powerState({ flash: { profileId: 'p2', modifier: 'reflector', distance: 1.5, ambientOffset: -1, tripod: true, powerMode: 'fixed', powerStops: 5 } }));
+      const w = d.warnings.find((x) => /強すぎます/.test(x.message));
+      const ok = w && /1\.9段/.test(w.message)
+        && /m まで下がる/.test(w.message) && /F を/.test(w.message) && /ISO を/.test(w.message)
+        // 自動でどれも変更しない：発光量も距離も設定値のまま
+        && d.flash.powerLabel === '1/32' && rel(d.flash.recommendedDistance, 2.91, 0.02);
+      return {
+        expected: '1.9段強すぎ / 距離・F・ISO の3案 / 自動変更なし',
+        actual: w ? w.message : '警告なし',
+        pass: ok,
+      };
+    });
+    add(36, '#34 で SS だけ 1/30 に変更 → 推奨距離は 2.9m のまま（SS不変条件）', () => {
+      const a = compute(powerState());                        // EV5 → SS 1/15
+      const b = compute(powerState({ scene: { evBase: 6, adjust: 0 } })); // EV6 → SS 1/30
+      const ok = b.ambient.ssLabel === '1/30' && a.ambient.ssLabel !== b.ambient.ssLabel
+        && rel(b.flash.recommendedDistance, a.flash.recommendedDistance, 1e-9)
+        && rel(b.flash.recommendedDistance, 2.91, 0.01);
+      return {
+        expected: 'SS 1/30 に変化 / 推奨距離 2.91m 不変',
+        actual: `SS ${a.ambient.ssLabel}→${b.ambient.ssLabel} / 推奨距離 ${a.flash.recommendedDistance.toFixed(2)}→${b.flash.recommendedDistance.toFixed(2)}m`,
+        pass: ok,
+      };
+    });
+    add(37, 'auto で上限 1/8 に当たる → 丸めず 3段不足の警告と代替案', () => {
+      // 必要発光量が 1/1（0段）になる距離＝GN_iso/N。上限 1/8(3段) なので 3段足りない
+      const gnIso = K233 * Math.sqrt(200) * Math.SQRT2;
+      const dist = gnIso / F28; // 16.48m
+      const d = compute(powerState({
+        flash: { profileId: 'p2', modifier: 'reflector', distance: dist, ambientOffset: -1, tripod: true, powerMode: 'auto' },
+      }));
+      const w = d.warnings.find((x) => /足りません/.test(x.message));
+      const ok = d.flash.powerLabel === '1/8'          // 上限で止まる
+        && w && w.level === 'alert' && /3段 足りません/.test(w.message)
+        && /まで詰める/.test(w.message) && /ISO を/.test(w.message);
+      return {
+        expected: '1/8 / alert「3段 足りません」/ 距離・ISO の代替案',
+        actual: `${d.flash.powerLabel} / ${w ? w.message : '警告なし'}`,
+        pass: ok,
+      };
     });
 
     add('20c', 'compute 日中: 同調速度の壁 = 5段', () => {
@@ -411,9 +489,10 @@
     add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {
       const a = compute(slowState({ flash: { profileId: 'p1', distance: 8, ambientOffset: -1, tripod: true } }));
       const b = compute(slowState({ flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true } }));
-      const stops = 2 * Math.log2(b.flash.reach / a.flash.reach); // 距離の2乗に反比例
-      const ok = rel(stops, 1.0, 0.01) && rel(b.flash.reach / a.flash.reach, Math.SQRT2, 0.01);
-      return { expected: '1.0段（√2倍）', actual: `${stops.toFixed(3)}段（${a.flash.reach.toFixed(1)}m→${b.flash.reach.toFixed(1)}m）`, pass: ok };
+      // reachFull＝フル発光時の到達（機材の能力）。reach は選んだ発光量で設定距離に寄るため使わない
+      const stops = 2 * Math.log2(b.flash.reachFull / a.flash.reachFull); // 距離の2乗に反比例
+      const ok = rel(stops, 1.0, 0.01) && rel(b.flash.reachFull / a.flash.reachFull, Math.SQRT2, 0.01);
+      return { expected: '1.0段（√2倍）', actual: `${stops.toFixed(3)}段（${a.flash.reachFull.toFixed(1)}m→${b.flash.reachFull.toFixed(1)}m）`, pass: ok };
     });
     add('13c', 'compute: 校正 k=2.333（200Ws→GN33）が到達距離に反映される', () => {
       const k = 33 / Math.sqrt(200); // 仕様 #13 の校正結果 ≈2.333
@@ -422,11 +501,11 @@
         flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true },
         profiles: makeState().profiles.map((p) => (p.id === 'p2' ? { ...p, k, calibrated: true } : p)),
       }));
-      // GN が k 比（2.333/4.0）になるので到達距離も同じ比になる
-      const ok = rel(cal.flash.reach / base.flash.reach, k / 4.0, 0.01) && cal.uncalibrated === false;
+      // GN が k 比（2.333/4.0）になるのでフル発光時の到達距離も同じ比になる
+      const ok = rel(cal.flash.reachFull / base.flash.reachFull, k / 4.0, 0.01) && cal.uncalibrated === false;
       return {
         expected: `比 ${(k / 4).toFixed(3)} / 未校正バッジ無し`,
-        actual: `比 ${(cal.flash.reach / base.flash.reach).toFixed(3)} / uncalibrated=${cal.uncalibrated}`,
+        actual: `比 ${(cal.flash.reachFull / base.flash.reachFull).toFixed(3)} / uncalibrated=${cal.uncalibrated}`,
         pass: ok,
       };
     });
