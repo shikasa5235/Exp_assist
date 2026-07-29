@@ -9,7 +9,7 @@ import {
 } from './flash.js';
 import {
   shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning,
-  daylightSync, slowSyncAmbient, formatStops, formatOffset,
+  daylightSync, slowSyncAmbient, formatStops, formatOffset, THIRD_STOP,
 } from './advisor.js';
 import { SUBJECTS, MODIFIERS, POWER_STEPS } from './scenes.js';
 
@@ -288,34 +288,45 @@ function manualResult(ev, st) {
   if (computedKey === 'ss') ssReal = solveSS(ev, isoReal, fReal, comp, nd);
   else if (computedKey === 'iso') isoReal = solveISO(ev, fReal, ssReal, comp, nd);
   else fReal = solveN(ev, isoReal, ssReal, comp, nd);
-  // 丸め前の連続値（診断用。丸めは snapTriple で表示直前に一度だけ行う）
-  const solved = { fCont: fReal, tCont: ssReal, isoCont: isoReal };
-  // 自由軸が範囲外＝ND等を吸収しきれない。ロックは破らずクランプし不足を警告（仕様の穴埋め）。
-  let warning = null;
-  const hasND = nd > 0;
-  if (computedKey === 'iso') {
-    if (isoReal > camera.isoMax) { warning = manualShort('ISO', Math.log2(isoReal / camera.isoMax), 'short', hasND); isoReal = camera.isoMax; }
-    else if (isoReal < camera.expandedISOMin) { warning = manualShort('ISO', Math.log2(camera.expandedISOMin / isoReal), 'bright', hasND); isoReal = camera.expandedISOMin; }
-  } else if (computedKey === 'ss') {
-    if (ssReal < camera.maxSS) { warning = manualShort('SS', Math.log2(camera.maxSS / ssReal), 'bright', hasND); ssReal = camera.maxSS; }
-    else if (ssReal > SLOWEST) { warning = manualShort('SS', Math.log2(ssReal / SLOWEST), 'short', hasND); ssReal = SLOWEST; }
-  } else {
-    if (fReal < lens.fMin) { warning = manualShort('F', 2 * Math.log2(lens.fMin / fReal), 'short', hasND); fReal = lens.fMin; }
-    else if (fReal > lens.fMax) { warning = manualShort('F', 2 * Math.log2(fReal / lens.fMax), 'bright', hasND); fReal = lens.fMax; }
-  }
-  const snapped = snapTriple(fReal, ssReal, isoReal);
-  // TODO(バグ③調査・確認後に削除): 自由軸の連続値と丸め結果を突き合わせる材料
-  const diag = {
-    evScene: ev,
-    evTarget: evTarget(ev, isoReal, comp, nd),
-    ...solved,
-    fIndex: snapped.f.index, fShown: snapped.f.label,
-    ssIndexShown: snapped.ss.index, ssShown: snapped.ss.label,
-    isoShown: snapped.iso.label,
-    computedKey, locks: { ...L }, nd, comp,
-    stateIdx: { f: manual.fIndex, ss: manual.ssIndex, iso: manual.isoIndex },
+
+  // 自由軸が範囲外＝ND等を吸収しきれない。ロックは破らずクランプし、不足/超過を段数付きで警告する。
+  // 黙ってクランプ後の値を出すと、達成できない露出を正しい答えとして提示することになる。
+  // 軸ごとの限界と「どちら側が不足か」を表引きにする（分岐の重複を避ける）。
+  const LIMITS = {
+    // stops: 段数への換算（F は面積比なので 2*log2、SS/ISO は log2）
+    f: { axis: 'F', lo: lens.fMin, hi: lens.fMax, loKind: 'short', hiKind: 'bright', stops: (a, b) => 2 * Math.log2(a / b) },
+    ss: { axis: 'SS', lo: camera.maxSS, hi: SLOWEST, loKind: 'bright', hiKind: 'short', stops: (a, b) => Math.log2(a / b) },
+    iso: { axis: 'ISO', lo: camera.expandedISOMin, hi: camera.isoMax, loKind: 'bright', hiKind: 'short', stops: (a, b) => Math.log2(a / b) },
   };
-  return { ...snapped, computedKey, warning, diag };
+  const spec = LIMITS[computedKey];
+  const value = { f: fReal, ss: ssReal, iso: isoReal }[computedKey];
+  let warning = null;
+  let clampedValue = value;
+  if (value < spec.lo) {
+    clampedValue = spec.lo;
+    warning = clampWarning(spec, spec.stops(spec.lo, value), spec.loKind, nd > 0);
+  } else if (value > spec.hi) {
+    clampedValue = spec.hi;
+    warning = clampWarning(spec, spec.stops(value, spec.hi), spec.hiKind, nd > 0);
+  }
+  if (computedKey === 'f') fReal = clampedValue;
+  else if (computedKey === 'ss') ssReal = clampedValue;
+  else isoReal = clampedValue;
+
+  return { ...snapTriple(fReal, ssReal, isoReal), computedKey, warning };
+}
+
+/**
+ * クランプ警告を作る。1/3段未満のズレは警告しない（表示の丸め幅に埋もれるため）。
+ * @param {{axis:string}} spec
+ * @param {number} stops 不足/超過の段数
+ * @param {'short'|'bright'} kind
+ * @param {boolean} hasND
+ * @returns {{level:string,icon:string,message:string}|null}
+ */
+function clampWarning(spec, stops, kind, hasND) {
+  if (stops < THIRD_STOP) return null;
+  return manualShort(spec.axis, stops, kind, hasND);
 }
 
 /* ====================================================================== */
@@ -389,7 +400,6 @@ function computeManual(st, evScene, prof, modLoss, d) {
     d.flash = flashCard(fs, st.flash.distance, d.uncalibrated, 'manual');
     flashRangeWarnings(fs, st.flash.distance, d);
     powerStops = fs.powerStops;
-    m.diag.powerStopsCont = fs.over; // TODO(バグ③調査・確認後に削除)
   }
   d.ruler = { deviation: 0, tracks: buildTracks(null, powerStops) };
   d.evSetting = Math.log2(m.f.real ** 2 / m.ss.real);

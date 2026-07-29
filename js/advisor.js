@@ -6,8 +6,12 @@ import { solveND } from './filters.js';
 import { gnBase, applyModifier, applyIso, effectiveGN, hssLoss } from './flash.js';
 import { F, SS, snap } from './stops.js';
 
-/** 発火閾値。1/焦点距離則は±1段の精度しかないため 1/3段未満の不足は警告しない。 */
-const THIRD_STOP = 1 / 3;
+/**
+ * 警告の発火閾値（段）。1/3段未満のズレは表示の丸め幅に埋もれ、
+ * 近似モデル（1/焦点距離則など）の精度も±1段しかないため警告しない。
+ * クランプ警告（compute 側）でも同じ方針を使うので export する。
+ */
+export const THIRD_STOP = 1 / 3;
 
 /**
  * 段数を人間可読に整形する。整数はそのまま、端数は小数第1位まで。

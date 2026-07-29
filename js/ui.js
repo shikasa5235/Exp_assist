@@ -511,7 +511,6 @@ function renderCalc() {
   });
   calcNdSuffix.textContent = sum ? `合計 ${sum}段（−${sum}EV）` : '装着なし';
   const m = derived.manual; if (!m) return;
-  console.log('[solve]', m.diag); // TODO(バグ③調査・確認後に削除)
   ['f', 'ss', 'iso'].forEach((key) => {
     const locked = key !== m.computedKey;
     const slot = wheels.calc[key];

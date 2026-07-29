@@ -367,6 +367,47 @@
         pass: ok,
       };
     });
+    add('31c', 'compute 計算タブ: 自由軸 F が開放でクランプ → 不足段数付きの警告', () => {
+      // EV10 / ISO200 / SS 1/500(厳密 1/512) → 必要 F = √(2^11/512) = 2.0
+      // レンズ開放 F2.8 では 2*log2(2.828/2.0) = 1.0段 足りない
+      const st = makeState({
+        ui: { tab: 'calc', theme: 'auto', firstRun: false },
+        scene: { evBase: 10, adjust: 0 },
+        camera: { isoMin: 200 },
+        lens: { fMin: F28, fMax: 22 },
+        manual: { fIndex: null, ssIndex: 27, isoIndex: 6, locks: { f: false, ss: true, iso: true } },
+      });
+      const d = compute(st);
+      const w = d.manual.warning;
+      const ok = w && w.level === 'alert' && /F が 1段 足りません/.test(w.message)
+        && d.manual.f.label === '2.8'
+        && d.warnings.some((x) => x === w); // 結果パネルにも出ること
+      return {
+        expected: 'alert / 「F が 1段 足りません」/ 表示F2.8',
+        actual: w ? `${w.level} / ${w.message} / F${d.manual.f.label}` : `警告なし / F${d.manual.f.label}`,
+        pass: ok,
+      };
+    });
+    add('31d', 'compute 計算タブ: クランプしても不足が 1/3段未満なら警告しない', () => {
+      // 必要 F = √(2^11 / 2^(25/3)) = √(2048/322.54) = 2.518
+      // 開放 F2.6 でクランプされるが不足は 2*log2(2.6/2.518) = 0.09段 → 1/3段未満なので出さない
+      const st = makeState({
+        ui: { tab: 'calc', theme: 'auto', firstRun: false },
+        scene: { evBase: 10, adjust: 0 },
+        camera: { isoMin: 200 },
+        lens: { fMin: 2.6, fMax: 22 },
+        manual: { fIndex: null, ssIndex: 25, isoIndex: 6, locks: { f: false, ss: true, iso: true } },
+      });
+      const d = compute(st);
+      const need = Math.sqrt(SS.real(25) * 2 ** 11); // 2.518（クランプ前の連続値）
+      const shortStops = 2 * Math.log2(2.6 / need);  // 0.09段
+      const ok = d.manual.warning === null && shortStops > 0 && shortStops < 1 / 3;
+      return {
+        expected: `警告なし（不足 ${shortStops.toFixed(2)}段 < 1/3段）`,
+        actual: d.manual.warning ? d.manual.warning.message : '警告なし',
+        pass: ok,
+      };
+    });
     add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {
       const a = compute(slowState({ flash: { profileId: 'p1', distance: 8, ambientOffset: -1, tripod: true } }));
       const b = compute(slowState({ flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true } }));
