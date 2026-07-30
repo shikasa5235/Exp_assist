@@ -45,17 +45,24 @@ export const SUBJECTS = Object.freeze([
  * @type {ReadonlyArray<{key:string,label:string,loss:number}>}
  */
 export const MODIFIERS = Object.freeze([
-  { key: 'reflector', label: '標準リフレクター',       loss: 0 },
-  { key: 'bare',      label: 'ベアバルブ',             loss: 1.0 },
-  { key: 'umbSilver', label: '反射アンブレラ(銀)',     loss: 1.5 },
-  { key: 'umbTrans',  label: '透過アンブレラ',         loss: 2.0 },
-  { key: 'sbSmall',   label: 'ソフトボックス60cm以下', loss: 2.0 },
-  { key: 'sbLarge',   label: 'ソフトボックス90cm以上', loss: 2.5 },
-  { key: 'beauty',    label: 'ビューティディッシュ',   loss: 1.5 },
+  { key: 'reflector', label: '標準リフレクター',            loss: 0 },
+  { key: 'akr1Dome',  label: 'AK-R1 ドームディフューザー',  loss: 1.5 },
+  { key: 'octa30',    label: 'オクタ 30cm',                 loss: 1.5 },
+  { key: 'octa60',    label: 'オクタ 60cm',                 loss: 2.0 },
+  { key: 'octa90',    label: 'オクタ 90cm',                 loss: 2.5 },
 ]);
 
 /** グリッド/ディフューザーの追加減光（モディファイアに加算）。仕様 §7.5。 */
 export const MODIFIER_ADDONS = Object.freeze({ grid: 1.5, diffuser: 0.5 });
+
+/**
+ * ブラックミストの減光段数（既定）。公称は露出倍数ほぼ1倍なので 0段。
+ * ND とは性質が異なるため solveND の探索対象には入れない（組み合わせが無意味に増えるだけ）。
+ * ただしレンズ前のガラス1枚なので**枚数には数える**（ケラレ・周辺光量落ちのリスクは同じ）。
+ * 実測で微小な減光がある場合に備え、設定で 0〜0.33段 の範囲で調整できる。
+ */
+export const BLACK_MIST_STOPS = 0;
+export const BLACK_MIST_STOPS_MAX = 1 / 3;
 
 /**
  * 発光量ステップと閃光時間の目安。仕様 §7.4 / §7.6。
@@ -72,6 +79,32 @@ export const POWER_STEPS = Object.freeze([
   { stops: 6, label: '1/64',  duration: 1 / 5000 },
   { stops: 7, label: '1/128', duration: 1 / 9000 },
 ]);
+
+/**
+ * 警告 → マニュアルのセクション（helpId）。manual.md §0.5 の対応表と1対1で対応する。
+ * 警告オブジェクトは必ずこの中の値を1つ持つ（`ui.js` が `?` ボタンの遷移先に使う）。
+ * ここを増やしたら manual.md §0.5 の表と本文アンカーも増やすこと（tools/check-help-anchors が検査）。
+ * @type {Readonly<Record<string,string>>}
+ */
+export const HELP = Object.freeze({
+  shake: 'help-warn-shake',
+  motion: 'help-warn-motion',
+  lightShort: 'help-warn-light-short',
+  nd: 'help-nd',
+  diffraction: 'help-warn-diffraction',
+  highIso: 'help-warn-high-iso',
+  tripod: 'help-warn-tripod',
+  syncWall: 'help-sync-wall',
+  flashDuration: 'help-flash-duration',
+  slowSync: 'help-slow-sync',
+  recycle: 'help-warn-recycle',
+  flashStrong: 'help-warn-flash-strong',
+  flashShort: 'help-warn-flash-short',
+  powerMode: 'help-power-mode',
+  powerCeiling: 'help-power-ceiling',
+  calcClamp: 'help-calc-clamp',
+  ok: 'help-warnings',
+});
 
 /** APEX の基準 ISO。EV 換算の分母。 */
 export const ISO_REF = 100;

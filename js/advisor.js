@@ -5,6 +5,7 @@ import { evTarget, solveSS, solveN, handShakeLimit } from './exposure.js';
 import { solveND } from './filters.js';
 import { gnBase, applyModifier, applyIso, effectiveGN, hssLoss } from './flash.js';
 import { F, SS, snap } from './stops.js';
+import { HELP } from './scenes.js';
 
 /**
  * 警告の発火閾値（段）。1/3段未満のズレは表示の丸め幅に埋もれ、
@@ -49,6 +50,7 @@ export function shakeWarning(ssReal, focal, isStops = 0) {
   return {
     level: 'warn',
     icon: 'shake',
+    helpId: HELP.shake,
     stops,
     message: `手ブレしやすい速度です（限界より${formatStops(stops)}段遅い）。三脚か、ISO を上げてください`,
   };
@@ -66,6 +68,7 @@ export function overBrightWarning(neededT, maxSSReal) {
   return {
     level: 'alert',
     icon: 'nd',
+    helpId: HELP.nd,
     stops,
     message: `明るすぎます。約${formatStops(stops)}段の減光が必要です（ND）`,
   };
@@ -83,6 +86,7 @@ export function isoFloorWarning(neededISO, expandedISOMin) {
   return {
     level: 'alert',
     icon: 'nd',
+    helpId: HELP.nd,
     stops,
     message: `明るすぎます。ISO を${formatStops(stops)}段下げきれません（拡張下限 ISO${expandedISOMin}）。減光してください`,
   };
@@ -101,6 +105,7 @@ export function freezeWarning(durationReal, subjectSSReal) {
   return {
     level: 'warn',
     icon: 'motion',
+    helpId: HELP.flashDuration,
     message: `閃光時間 ${snap(SS, durationReal).label} ではこの被写体は止まりません。発光量を下げて距離を詰めてください`,
   };
 }
@@ -128,6 +133,7 @@ export function ndCountWarnings(nd, ctx) {
     out.push({
       level: 'info',
       icon: 'nd',
+      helpId: HELP.nd,
       message: `ISO を拡張下限（${expandedISOMin}）まで下げれば${tail}（画質低下の可能性あり）`,
     });
   }
@@ -135,6 +141,7 @@ export function ndCountWarnings(nd, ctx) {
     out.push({
       level: 'warn',
       icon: 'nd',
+      helpId: HELP.nd,
       message: `ND を${nd.count}枚重ねます。ケラレ・色被りに注意してください`,
     });
   }
@@ -210,7 +217,7 @@ export function daylightSync(p) {
     };
     if (clampStops > 1e-6) {
       out.warnings.push({
-        level: 'warn', icon: 'hss',
+        level: 'warn', icon: 'hss', helpId: HELP.syncWall,
         message: `HSS経路は SS上限のため背景は ${formatOffset(achievableOffset)}段までです（${formatStops(clampStops)}段明るくなります）`,
       });
     }

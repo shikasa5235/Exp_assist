@@ -65,9 +65,9 @@
       shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning,
       daylightSync, slowSyncAmbient, ndCountWarnings, formatStops,
     } from './js/advisor.js';
-    import { SUBJECTS, POWER_STEPS } from './js/scenes.js';
+    import { SUBJECTS, POWER_STEPS, HELP } from './js/scenes.js';
     import { compute } from './js/compute.js';
-    import { makeState } from './js/state.js';
+    import { makeState, migrate } from './js/state.js';
 
     // ---- 判定ヘルパー -------------------------------------------------------
     const rel = (a, b, tol = 0.01) => Math.abs(a - b) <= Math.abs(b) * tol + 1e-9;
@@ -336,8 +336,9 @@
       scene: { evBase: 5, adjust: 0 },
       camera: { isoMin: 200 },
       lens: { fMin: F28 },
+      // 校正はモディファイアごと：標準リフレクターで k=2.33 を実測した状態にする
       profiles: makeState().profiles.map((p) => (p.id === 'p2'
-        ? { ...p, k: K233, calibrated: true, powerCeilingStops: 3, minPowerStops: 7 } : p)),
+        ? { ...p, cal: { reflector: K233 }, powerCeilingStops: 3, minPowerStops: 7 } : p)),
       flash: { profileId: 'p2', modifier: 'reflector', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'fixed', powerStops: 5 },
       ...patch,
     });
@@ -422,6 +423,143 @@
       const ok = rel(ratio, 2.0, 0.02) && rel(adv, 2.0, 0.02) && /2段有利/.test(d.paths.advantage || '');
       return { expected: '比2.0 / 2段有利', actual: `比${ratio.toFixed(3)} / ${adv.toFixed(3)}段 "${d.paths.advantage || ''}"`, pass: ok };
     });
+    add(38, '発光量 1/4 固定 → 推奨距離 約8.2m', () => {
+      const d = compute(powerState({
+        flash: { profileId: 'p2', modifier: 'reflector', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'fixed', powerStops: 2 },
+      }));
+      const gnIso = K233 * Math.sqrt(200) * Math.SQRT2;  // 46.60
+      const expect = (gnIso * 2 ** -1) / F28;            // 23.30 / 2.8284 = 8.24
+      const ok = rel(d.flash.recommendedDistance, expect, 0.01) && rel(expect, 8.24, 0.01)
+        && d.flash.powerLabel === '1/4';
+      return {
+        expected: `推奨距離 ${expect.toFixed(2)}m / 1/4`,
+        actual: `${d.flash.recommendedDistance.toFixed(2)}m / ${d.flash.powerLabel}`,
+        pass: ok,
+      };
+    });
+    add(39, 'auto で上限 1/4（2段）に当たる → 1段不足の警告（help-power-ceiling）', () => {
+      // 必要発光量が 1段（1/2）相当の距離＝フル発光到達 ÷ √2
+      const gnIso = K233 * Math.sqrt(200) * Math.SQRT2;
+      const dist = (gnIso / F28) / Math.SQRT2; // 16.48 / 1.414 = 11.65m
+      const d = compute(powerState({
+        profiles: makeState().profiles.map((p) => (p.id === 'p2'
+          ? { ...p, cal: { reflector: K233 }, powerCeilingStops: 2, minPowerStops: 7 } : p)),
+        flash: { profileId: 'p2', modifier: 'reflector', distance: dist, ambientOffset: -1, tripod: true, powerMode: 'auto' },
+      }));
+      const w = d.warnings.find((x) => /上限/.test(x.message));
+      const ok = d.flash.powerLabel === '1/4' && w && w.level === 'alert'
+        && /1段 足りません/.test(w.message) && w.helpId === 'help-power-ceiling';
+      return {
+        expected: '1/4 / alert「上限 1/4 では 1段 足りません」/ help-power-ceiling',
+        actual: `${d.flash.powerLabel} / ${w ? `${w.level}「${w.message}」/ ${w.helpId}` : '警告なし'}`,
+        pass: ok,
+      };
+    });
+    add(40, 'モディファイア オクタ60cm(2段)に切替 → 到達 約8.2m かつ 未校正', () => {
+      // 標準リフレクターで校正済み（k=2.33）だが、オクタ60cm は未校正なのでバッジが出る
+      const d = compute(powerState({
+        flash: { profileId: 'p2', modifier: 'octa60', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'auto' },
+      }));
+      // オクタ60cm は未校正なので k は推定値 4.0 に戻り、オクタの推定2段を適用する
+      const gnIsoEst = 4.0 * Math.sqrt(200) * Math.SQRT2;   // 80.0
+      const expect = (gnIsoEst * 2 ** -1) / F28;            // 40.0 / 2.8284 = 14.14m
+      const ok = rel(d.flash.reachFull, expect, 0.01) && rel(expect, 14.14, 0.01)
+        && d.uncalibrated === true && d.badges.some((b) => /推定値/.test(b.text));
+      return {
+        expected: `フル発光到達 ${expect.toFixed(2)}m（推定kに戻る）/ uncalibrated=true / バッジあり`,
+        actual: `${d.flash.reachFull.toFixed(2)}m / uncalibrated=${d.uncalibrated} / バッジ${d.badges.length}件`,
+        pass: ok,
+      };
+    });
+    add(43, 'オクタ60cm で校正 → modLoss が二重に引かれない', () => {
+      // cal['octa60'] はオクタを付けて測った実効 k なので、そこに推定2段を上乗せしてはいけない
+      const kOcta = 1.65; // 実測相当（標準リフレクター 2.33 の約2段落ち）
+      const d = compute(powerState({
+        profiles: makeState().profiles.map((p) => (p.id === 'p2'
+          ? { ...p, cal: { reflector: K233, octa60: kOcta }, powerCeilingStops: 3, minPowerStops: 7 } : p)),
+        flash: { profileId: 'p2', modifier: 'octa60', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'auto' },
+      }));
+      const expect = (kOcta * Math.sqrt(200) * Math.SQRT2) / F28; // 減光の上乗せなし
+      const doubled = expect / 2;                                  // 二重計上なら2段ぶん落ちる
+      const ok = rel(d.flash.reachFull, expect, 0.01) && !rel(d.flash.reachFull, doubled, 0.01)
+        && d.uncalibrated === false;
+      return {
+        expected: `フル発光到達 ${expect.toFixed(2)}m（二重計上なら ${doubled.toFixed(2)}m）/ 校正済み`,
+        actual: `${d.flash.reachFull.toFixed(2)}m / uncalibrated=${d.uncalibrated}`,
+        pass: ok,
+      };
+    });
+    add(44, '標準リフレクター校正済み → オクタ60cm に切替は推定 k に戻る', () => {
+      const d = compute(powerState({
+        flash: { profileId: 'p2', modifier: 'octa60', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'auto' },
+      }));
+      // 未校正なので base k=4.0 に戻り、オクタの推定2段を適用 → 80.0 × 2^-1 ÷ 2.8284 = 14.14m
+      const expect = (4.0 * Math.sqrt(200) * Math.SQRT2 * 2 ** -1) / F28;
+      const ok = rel(d.flash.reachFull, expect, 0.01) && rel(expect, 14.14, 0.01) && d.uncalibrated === true;
+      return {
+        expected: `${expect.toFixed(2)}m / uncalibrated=true`,
+        actual: `${d.flash.reachFull.toFixed(2)}m / uncalibrated=${d.uncalibrated}`,
+        pass: ok,
+      };
+    });
+    add(45, '移行: 旧 calibrated:true の k が cal.reflector に移り、削除済み modifier は標準へ', () => {
+      const legacy = {
+        // schemaVersion なし＝v1。削除済みキー 'sbLarge' を持つ旧データ
+        flash: { profileId: 'p1', modifier: 'sbLarge', distance: 3, ambientOffset: -1 },
+        profiles: [
+          { id: 'p1', name: '100Ws', ws: 100, k: 2.9, hss: true, minPowerStops: 7, modifier: 'umbTrans', calibrated: true },
+        ],
+      };
+      const { state: m, migrated, notice } = migrate(legacy);
+      const p = m.profiles[0];
+      const ok = m.schemaVersion === 2 && migrated === true
+        && p.cal && rel(p.cal.reflector, 2.9, 1e-9) && p.calibrated === undefined
+        && p.modifier === 'reflector' && m.flash.modifier === 'reflector'
+        && typeof notice === 'string' && /再校正/.test(notice);
+      return {
+        expected: 'v2 / cal.reflector=2.9 / modifier=reflector / 通知あり',
+        actual: `v${m.schemaVersion} / cal=${JSON.stringify(p.cal)} / ${p.modifier} / ${m.flash.modifier} / ${notice ? '通知あり' : '通知なし'}`,
+        pass: ok,
+      };
+    });
+    add(46, 'fixed は上限を無視する（上限1/8でも 1/4 を選べる）', () => {
+      const d = compute(powerState({
+        profiles: makeState().profiles.map((p) => (p.id === 'p2'
+          ? { ...p, cal: { reflector: K233 }, powerCeilingStops: 3, minPowerStops: 7 } : p)),
+        flash: { profileId: 'p2', modifier: 'reflector', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'fixed', powerStops: 2 },
+      }));
+      const expect = (K233 * Math.sqrt(200) * Math.SQRT2 * 2 ** -1) / F28; // 8.24m
+      const ceilingWarn = d.warnings.some((w) => /上限/.test(w.message));
+      const ok = d.flash.powerLabel === '1/4' && rel(d.flash.recommendedDistance, expect, 0.01) && !ceilingWarn;
+      return {
+        expected: `1/4 / 推奨距離 ${expect.toFixed(2)}m / 上限警告なし`,
+        actual: `${d.flash.powerLabel} / ${d.flash.recommendedDistance.toFixed(2)}m / ${ceilingWarn ? '上限警告あり' : '上限警告なし'}`,
+        pass: ok,
+      };
+    });
+    add(41, 'ND8 + ブラックミスト → 合計3段 / 2枚 / ケラレ警告なし', () => {
+      const d = compute(makeState({ nd: [3], filters: { blackMist: true }, focal: 24 }));
+      const ok = rel(d.filters.ndStops, 3, 1e-9) && d.filters.count === 2
+        && !d.warnings.some((w) => /周辺が落ちる/.test(w.message))
+        && d.filters.label === 'ND8 + ブラックミスト';
+      return {
+        expected: '3段 / 2枚 / 警告なし',
+        actual: `${d.filters.ndStops}段 / ${d.filters.count}枚 / ${d.filters.label}`,
+        pass: ok,
+      };
+    });
+    add(42, 'ND2+ND16+ブラックミスト → 合計5段 / 3枚 / ケラレ警告あり', () => {
+      const d = compute(makeState({ nd: [1, 4], filters: { blackMist: true }, focal: 24 }));
+      const w = d.warnings.find((x) => /周辺が落ちる/.test(x.message));
+      const ok = rel(d.filters.ndStops, 5, 1e-9) && d.filters.count === 3
+        && w && w.level === 'warn' && /3枚/.test(w.message) && /24mm/.test(w.message);
+      return {
+        expected: '5段 / 3枚 / warn（「3枚」を含む）',
+        actual: `${d.filters.ndStops}段 / ${d.filters.count}枚 / ${w ? w.message : '警告なし'}`,
+        pass: ok,
+      };
+    });
+
     add('30c', 'compute 日中: HSS が SS上限で頭打ち → クランプ後SSで到達再計算＋達成可能な背景段数', () => {
       // EV14/ISO200/F2.8/背景−2段 → 理想SS 1/16384 は上限 1/8192 を超える（1段ぶん達成不能）
       const d = compute(dayState({
@@ -499,7 +637,7 @@
       const base = compute(slowState({ flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true } }));
       const cal = compute(slowState({
         flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true },
-        profiles: makeState().profiles.map((p) => (p.id === 'p2' ? { ...p, k, calibrated: true } : p)),
+        profiles: makeState().profiles.map((p) => (p.id === 'p2' ? { ...p, cal: { reflector: k } } : p)),
       }));
       // GN が k 比（2.333/4.0）になるのでフル発光時の到達距離も同じ比になる
       const ok = rel(cal.flash.reachFull / base.flash.reachFull, k / 4.0, 0.01) && cal.uncalibrated === false;
@@ -554,13 +692,79 @@
       return { expected: '警告なし', actual: w ? w.message : '警告なし', pass: !w };
     });
 
+    // ======================================================================
+    //  #33 helpId の網羅性（manual.md §0.5 の対応表と実装の一致）
+    // ======================================================================
+    add(33, '全警告が §0.5 の表に存在する helpId を持ち、HELP の全値が発生する', async () => {
+      // 1) 対応表（正典）から helpId を取得。docs を読むので code↔doc のずれも検出できる。
+      const md = await (await fetch('./docs/exposure-app-manual.md')).text();
+      const table = md.slice(md.indexOf('### 警告 → セクション 対応表'), md.indexOf('## 0.6'));
+      const documented = new Set((table.match(/`help-[a-z0-9-]+`/g) || []).map((s) => s.replace(/`/g, '')));
+
+      // 2) 全分岐を通す。advisor は直接呼び、compute は状態を作って呼ぶ。
+      const collected = [];
+      const push = (w) => { if (w) collected.push(Array.isArray(w) ? w : [w]); };
+      push(shakeWarning(SS.real(18), 200, 0));                       // 手ブレ
+      push(overBrightWarning(solveSS(16, 100, F.real(3)), SS.real(39))); // 明るすぎ（減光）
+      push(isoFloorWarning(25, 50));                                  // ISO 下げきれない
+      push(freezeWarning(POWER_STEPS[0].duration, 1 / 500));          // 閃光時間
+      push(ndCountWarnings(solveND([1, 2, 3, 4], 5), { baseISO: 200, expandedISOMin: 50, ownedND: [1, 2, 3, 4], wallStops: 5 }));
+      push(ndCountWarnings(solveND([1, 2, 3, 4], 8), { baseISO: 200, expandedISOMin: 50, ownedND: [1, 2, 3, 4], wallStops: 8 }));
+
+      const scenarios = [
+        // 情報系（回折・高感度・三脚）と光量不足・被写体ブレ
+        makeState({ intent: 'blur', lens: { fMin: 16, fMax: 22 }, scene: { evBase: 15, adjust: 0 } }),
+        makeState({ intent: 'blur', scene: { evBase: 3, adjust: 0 }, camera: { isoMin: 200, isoMax: 6400 } }),
+        makeState({ intent: 'landscape', scene: { evBase: 3, adjust: 0 } }),
+        makeState({ intent: 'nightHandheld', scene: { evBase: -6, adjust: 0 }, focal: 200 }),
+        makeState({ intent: 'freeze', subject: 'vehicle', scene: { evBase: 5, adjust: 0 }, camera: { isoMin: 200, isoMax: 400 } }),
+        makeState({ intent: 'blur', subject: 'walking', scene: { evBase: 6, adjust: 0 } }),
+        // 明るすぎ（SS上限）と ISO 下限
+        makeState({ intent: 'blur', scene: { evBase: 16, adjust: 0 }, lens: { fMin: 1.4, fMax: 22 } }),
+        // ストロボ：過剰決定（強すぎ／足りない）・上限・最小発光量・閃光時間・後幕・チャージ
+        powerState({ flash: { profileId: 'p2', modifier: 'reflector', distance: 1.5, ambientOffset: -1, tripod: true, powerMode: 'fixed', powerStops: 5 } }),
+        powerState({ flash: { profileId: 'p2', modifier: 'reflector', distance: 12, ambientOffset: -1, tripod: true, powerMode: 'fixed', powerStops: 7 } }),
+        // auto が上限（強い側）に当たる：0 ≦ 必要発光量 < 上限。上限2段なら 8.3〜16.5m が成立範囲
+        powerState({
+          profiles: makeState().profiles.map((p) => (p.id === 'p2'
+            ? { ...p, cal: { reflector: K233 }, powerCeilingStops: 2, minPowerStops: 7 } : p)),
+          flash: { profileId: 'p2', modifier: 'reflector', distance: 11.65, ambientOffset: -1, tripod: true, powerMode: 'auto' },
+        }),
+        // フル発光でも届かない（ストロボ側の物理的な光量不足）
+        powerState({ flash: { profileId: 'p2', modifier: 'reflector', distance: 40, ambientOffset: -1, tripod: true, powerMode: 'auto' } }),
+        powerState({ flash: { profileId: 'p2', modifier: 'reflector', distance: 0.5, ambientOffset: -1, tripod: true, powerMode: 'auto' } }),
+        slowState({ flash: { profileId: 'p1', distance: 20, ambientOffset: -1, tripod: true }, camera: { isoMin: 200 } }),
+        // 日中シンクロ：HSS の SS上限クランプ／壁を越えられない
+        dayState({ scene: { evBase: 14, adjust: 0 }, camera: { syncSpeed: SYNC, isoMin: 200, maxSS: 2 ** -13 }, flash: { profileId: 'p1', modifier: 'reflector', distance: 2, ambientOffset: -2 } }),
+        dayState({ scene: { evBase: 16, adjust: 0 }, settings: { ownedND: [1], hssBaseLoss: 2, ambientOffsetDefault: -1, comp: 0 }, profiles: makeState().profiles.map((p) => ({ ...p, hss: false })) }),
+        // 計算タブ：クランプ（不足／超過）
+        makeState({ ui: { tab: 'calc', theme: 'auto', firstRun: false }, scene: { evBase: 10, adjust: 0 }, camera: { isoMin: 200 }, lens: { fMin: F28, fMax: 22 }, manual: { fIndex: null, ssIndex: 27, isoIndex: 6, locks: { f: false, ss: true, iso: true } } }),
+        makeState({ ui: { tab: 'calc', theme: 'auto', firstRun: false }, scene: { evBase: 16, adjust: 0 }, camera: { isoMin: 200 }, lens: { fMin: F28, fMax: 8 }, manual: { fIndex: null, ssIndex: 15, isoIndex: 6, locks: { f: false, ss: true, iso: true } } }),
+        // 警告なし（この設定で撮れます）
+        makeState({ intent: 'blur', scene: { evBase: 13, adjust: 0 }, focal: 24 }),
+      ];
+      scenarios.forEach((st) => push(compute(st).warnings));
+
+      const all = collected.flat();
+      const bad = all.filter((w) => !w.helpId || !documented.has(w.helpId));
+      const produced = new Set(all.map((w) => w.helpId));
+      const unreached = Object.values(HELP).filter((id) => !produced.has(id));
+      const ok = all.length > 0 && bad.length === 0 && unreached.length === 0;
+      return {
+        expected: `全警告が表内の helpId を持つ / HELP ${Object.keys(HELP).length} 値すべて発生`,
+        actual: `警告 ${all.length}件 / 表外・欠落 ${bad.length}件${bad.length ? `（${bad.map((w) => w.helpId || 'なし').join(',')}）` : ''} / 未到達 ${unreached.length}件${unreached.length ? `（${unreached.join(',')}）` : ''}`,
+        pass: ok,
+      };
+    });
+
     // ---- 実行 & 描画 --------------------------------------------------------
     const rows = document.getElementById('rows');
     let passed = 0;
     for (const test of T) {
       let r;
       try {
-        r = test.run();
+        // 非同期テスト（#33 は docs を読む）も同じ経路で扱う
+        r = await test.run();
       } catch (e) {
         r = { expected: '(実行成功)', actual: `例外: ${e.message}`, pass: false };
       }

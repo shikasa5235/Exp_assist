@@ -46,7 +46,7 @@ for f in js/*.js tests.html; do
   done
 done
 
-# 3) 集合差：解決できない import を列挙
+# 3) 集合差その1：解決できない import（import した名前が export に無い）
 fail=0
 while read -r consumer mod name; do
   if ! grep -qx "$mod $name" "$TMP/exports.txt"; then
@@ -54,6 +54,33 @@ while read -r consumer mod name; do
     fail=1
   fi
 done < "$TMP/imports.txt"
+
+# 4) 集合差その2：**使っているのに import していない**名前
+#    これを見ないと「migrate is not defined」のような実行時エラーを取り逃す。
+#    ブラウザでは import 解決の失敗＝モジュール全体が読めない＝テストが1件も走らないため、
+#    「緑でも赤でもない」最悪の状態になる。ここで機械的に落とす。
+#    走査対象は自プロジェクトの export 名だけ（外部語彙を相手にしないので誤検出が少ない）。
+cut -d' ' -f2 "$TMP/exports.txt" | sort -u > "$TMP/all-exports.txt"
+for f in js/*.js tests.html; do
+  [ -f "$f" ] || continue
+  b=$(basename "$f")
+  # 行コメントと JSDoc の継続行を落とす（コメント内の言及で誤検出しないため）
+  sed -E 's://.*::; s:^[[:space:]]*\*.*::' "$f" > "$TMP/src.txt"
+  # このファイルが import した名前／自前で宣言した名前／名前空間の別名は対象外
+  awk -v b="$b" '$1==b {print $3}' "$TMP/imports.txt" | sort -u > "$TMP/have-names.txt"
+  grep -oE "^[[:space:]]*(export )?(function|const|let|var|class) [A-Za-z0-9_]+" "$f" \
+    | sed -E 's/.*(function|const|let|var|class) //' | sort -u >> "$TMP/have-names.txt"
+  grep -oE "import \* as [A-Za-z0-9_]+" "$f" | sed -E 's/import \* as //' >> "$TMP/have-names.txt"
+  sort -u "$TMP/have-names.txt" -o "$TMP/have-names.txt"
+  while read -r name; do
+    grep -qx "$name" "$TMP/have-names.txt" && continue
+    # 呼び出し `name(` か、メンバー参照 `name.` のどちらか。直前がドットや語なら別物なので除く
+    if grep -qE "(^|[^.[:alnum:]_])$name[[:space:]]*[(.]" "$TMP/src.txt"; then
+      echo "NOT IMPORTED: $b が $name を使っているが import していない"
+      fail=1
+    fi
+  done < "$TMP/all-exports.txt"
+done
 
 n_imp=$(wc -l < "$TMP/imports.txt")
 n_exp=$(wc -l < "$TMP/exports.txt")
@@ -63,13 +90,18 @@ if [ "$n_imp" -eq 0 ] || [ "$n_exp" -eq 0 ]; then
   return 2 2>/dev/null || exit 2
 fi
 if [ "$fail" -eq 0 ]; then
-  echo "OK: $n_imp 件の import すべてが実在 export に解決（export $n_exp 件、対象 $count_js モジュール）"
+  echo "OK: import $n_imp 件がすべて解決、使用名の import 漏れもゼロ"
+  echo "    （export $n_exp 件 / 対象 $count_js モジュール ＋ tests.html）"
 else
-  echo "NG: 未解決の import があります（export $n_exp 件）"
+  echo "NG: 上記の問題があります（export $n_exp 件）"
 fi
 
-# 名前空間 import は名前照合できないので参考表示
+# 名前空間 import は名前照合できないので参考表示（このツールが保証しない範囲）
 ns=$(grep -rhoE "import \* as [A-Za-z0-9_]+ from '[^']+'" js/ tests.html 2>/dev/null | sort -u)
-[ -n "$ns" ] && { echo "--- 名前空間 import（メンバーは個別確認）---"; echo "$ns" | sed 's/^/  /'; }
+[ -n "$ns" ] && {
+  echo "--- 検査対象外：名前空間 import のメンバー名 ---"
+  echo "$ns" | sed 's/^/  /'
+  echo "  storage.svae() のような綴り誤りは検出できない（MAINTENANCE.md §11）"
+}
 
 exit "$fail"

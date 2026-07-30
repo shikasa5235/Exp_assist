@@ -12,15 +12,62 @@ import {
   shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning,
   daylightSync, slowSyncAmbient, formatStops, formatOffset, THIRD_STOP,
 } from './advisor.js';
-import { SUBJECTS, MODIFIERS, POWER_STEPS } from './scenes.js';
+import { SUBJECTS, MODIFIERS, POWER_STEPS, HELP } from './scenes.js';
 
 const SLOWEST = 2 ** (-SS.minIndex / 3); // 系列最遅（= 30″ の実体 32 秒）
 const F8 = 8; // 風景の固定F値
 
 /* ---- 小さな純粋ヘルパー ------------------------------------------------ */
 
-/** 装着中 ND の合計段数。 @param {object} st @returns {number} */
-function ndStops(st) { return (st.nd || []).reduce((a, b) => a + b, 0); }
+/**
+ * 装着中フィルターの合計減光段数。ND ＋ ブラックミスト（既定0段）。
+ * レンズ前にあるのでアンビエントとストロボの両方に等しく効く。
+ * @param {object} st @returns {number}
+ */
+function ndStops(st) {
+  const nd = (st.nd || []).reduce((a, b) => a + b, 0);
+  return nd + (st.filters?.blackMist ? (st.settings.blackMistStops || 0) : 0);
+}
+
+/**
+ * 装着中フィルターの枚数と表示ラベル。ブラックミストは減光0段でも1枚として数える
+ * （レンズ前のガラス1枚なので周辺光量落ちのリスクは ND と同じ）。
+ * @param {object} st
+ * @returns {{count:number,label:string,ndStops:number}}
+ */
+function filterInfo(st) {
+  const ndArr = [...(st.nd || [])].sort((a, b) => a - b);
+  const mist = !!st.filters?.blackMist;
+  const parts = [];
+  if (ndArr.length) parts.push(ndArr.map(ndName).join('+'));
+  if (mist) parts.push('ブラックミスト');
+  return {
+    count: ndArr.length + (mist ? 1 : 0),
+    label: parts.join(' + '), // ND と光学フィルターを分けて表記
+    ndStops: ndStops(st),
+  };
+}
+
+/** 使用中プロファイル＋モディファイアの実測 k（未校正なら推定値の k）。 */
+function kFor(prof, modifierKey) {
+  const v = prof.cal ? prof.cal[modifierKey] : undefined;
+  return v == null ? prof.k : v;
+}
+
+/** そのプロファイル×モディファイアが未校正か。 */
+function isUncalibrated(prof, modifierKey) {
+  return !prof.cal || prof.cal[modifierKey] == null;
+}
+
+/**
+ * 適用すべきモディファイア減光。**校正済みの組み合わせでは 0 を返す。**
+ * `cal[modifier]` はそのモディファイアを付けた状態で測った実効 k なので減光を既に含む。
+ * そこに推定の減光段数を上乗せすると二重に引くことになる。
+ * @param {object} prof @param {string} modifierKey @returns {number} 段
+ */
+function modLossFor(prof, modifierKey) {
+  return isUncalibrated(prof, modifierKey) ? modLossOf(modifierKey) : 0;
+}
 
 /** ND 段数 → 表示名（ND2/ND4/…）。 @param {number} stops @returns {string} */
 function ndName(stops) { return `ND${2 ** stops}`; }
@@ -125,13 +172,13 @@ function clampAmbient(r, st, ev) {
 
   // 光量不足：必要ISOが上限超過（夜・手持ちなど）
   if (r.shortStops > 1e-3) {
-    warnings.push({ level: 'alert', icon: 'noise',
+    warnings.push({ level: 'alert', icon: 'noise', helpId: HELP.lightShort,
       message: `光量が${formatStops(r.shortStops)}段足りません。開放を明るく、または三脚が必要です` });
   }
   // 被写体ブレ：止めたいのに必要SSへ届かない
   if (r.missSS != null && ssReal > r.missSS) {
     const s = Math.log2(ssReal / r.missSS);
-    warnings.push({ level: 'warn', icon: 'motion',
+    warnings.push({ level: 'warn', icon: 'motion', helpId: HELP.motion,
       message: `被写体が流れます。1/${Math.round(1 / r.missSS)} 以上が必要（${formatStops(s)}段不足）` });
   }
   // 手ブレ（SSを固定していない意図で、限界より遅いとき）
@@ -142,13 +189,13 @@ function clampAmbient(r, st, ev) {
   // 被写体ブレ基準（止める意図以外でも動く被写体なら）
   const req = subjectSSOf(subject);
   if (intent !== 'freeze' && req != null && ssReal > req) {
-    warnings.push({ level: 'warn', icon: 'motion',
+    warnings.push({ level: 'warn', icon: 'motion', helpId: HELP.motion,
       message: `被写体が流れます。1/${Math.round(1 / req)} 以上にしてください` });
   }
   // 回折・高感度・三脚（情報）
-  if (fReal > 11) warnings.push({ level: 'info', icon: 'diffraction', message: '回折で解像が落ち始めます' });
-  if (isoReal > camera.isoMax / 2) warnings.push({ level: 'info', icon: 'noise', message: 'ノイズが目立ち始める領域です' });
-  if (ssReal >= 0.5) warnings.push({ level: 'info', icon: 'tripod', message: '三脚推奨（SS 1/2秒以上）' });
+  if (fReal > 11) warnings.push({ level: 'info', icon: 'diffraction', helpId: HELP.diffraction, message: '回折で解像が落ち始めます' });
+  if (isoReal > camera.isoMax / 2) warnings.push({ level: 'info', icon: 'noise', helpId: HELP.highIso, message: 'ノイズが目立ち始める領域です' });
+  if (ssReal >= 0.5) warnings.push({ level: 'info', icon: 'tripod', helpId: HELP.tripod, message: '三脚推奨（SS 1/2秒以上）' });
 
   return { fReal, ssReal, isoReal, warnings };
 }
@@ -226,7 +273,9 @@ function resolveFlashSide(st, prof, gnIso, N, ndTotal, hssLossStops, d) {
   const over = overStops(gnFull, N, setDistance);
   let powerStops, fec, shortStops = 0, excessStops = 0;
   if (fixed) {
-    powerStops = Math.max(ceiling, Math.min(minPower, flash.powerStops));
+    // fixed はユーザーの明示的な選択。上限（auto の主案選択にだけ効く）は無視する
+    // ——「入力を拒否しない」原則。弱い側の限界（機材の物理）だけでクランプする。
+    powerStops = Math.max(0, Math.min(minPower, flash.powerStops));
     fec = 0; // 距離を解くので端数は距離側に寄せる
   } else {
     ({ powerStops, fec, shortStops, excessStops } = resolvePowerWithCeiling(over, { ceilingStops: ceiling, minPowerStops: minPower }));
@@ -244,21 +293,32 @@ function resolveFlashSide(st, prof, gnIso, N, ndTotal, hssLossStops, d) {
       const n = formatStops(Math.abs(diff));
       const dTxt = recommended.toFixed(1);
       d.warnings.push(diff > 0
-        ? { level: 'warn', icon: 'flash', message: `発光量 ${powerLabel} では ${n}段 強すぎます。${dTxt}m まで下がる／F を ${n}段絞る／ISO を ${n}段下げる` }
-        : { level: 'warn', icon: 'flash', message: `発光量 ${powerLabel} では ${n}段 足りません。${dTxt}m まで詰める／F を ${n}段開ける／ISO を ${n}段上げる` });
+        ? { level: 'warn', icon: 'flash', helpId: HELP.powerMode, message: `発光量 ${powerLabel} では ${n}段 強すぎます。${dTxt}m まで下がる／F を ${n}段絞る／ISO を ${n}段下げる` }
+        : { level: 'warn', icon: 'flash', helpId: HELP.powerMode, message: `発光量 ${powerLabel} では ${n}段 足りません。${dTxt}m まで詰める／F を ${n}段開ける／ISO を ${n}段上げる` });
     }
   } else {
     // auto が上限に当たった：黙って丸めず不足段数と代替案を出す
     if (shortStops >= THIRD_STOP) {
-      const n = formatStops(shortStops);
       const dTxt = recommended.toFixed(1);
-      const remedies = [`距離を ${dTxt}m まで詰める`, `ISO を ${n}段上げる`];
-      if (ndTotal > 0) remedies.push('ND を1枚外す');
-      d.warnings.push({ level: 'alert', icon: 'flash',
-        message: `上限 ${powerLabel} では ${n}段 足りません。${remedies.join('／')}` });
+      if (over < -1e-9) {
+        // フル発光でも届かない＝ストロボ側の物理的な光量不足（到達距離 < 設定距離）。
+        // アンビエント側の光量不足（ISO上限・開放でも足りない）とは対処が違うので別セクションへ。
+        const n = formatStops(-over);
+        const remedies = [`距離を ${(gnFull / N).toFixed(1)}m まで詰める`, `ISO を ${n}段上げる`, `F を ${n}段開ける`];
+        if (ndTotal > 0) remedies.push('ND を外す');
+        d.warnings.push({ level: 'alert', icon: 'flash', helpId: HELP.flashShort,
+          message: `フル発光でも ${n}段 足りません（到達 ${(gnFull / N).toFixed(1)}m／設定 ${setDistance}m）。${remedies.join('／')}` });
+      } else {
+        // 光は足りているが、発光量の上限（強い側の限界）に当たって使えない＝設定の問題。
+        const n = formatStops(shortStops);
+        const remedies = [`距離を ${dTxt}m まで詰める`, `ISO を ${n}段上げる`];
+        if (ndTotal > 0) remedies.push('ND を1枚外す');
+        d.warnings.push({ level: 'alert', icon: 'flash', helpId: HELP.powerCeiling,
+          message: `上限 ${powerLabel} では ${n}段 足りません。${remedies.join('／')}` });
+      }
     }
     if (excessStops >= THIRD_STOP) {
-      d.warnings.push({ level: 'warn', icon: 'flash',
+      d.warnings.push({ level: 'warn', icon: 'flash', helpId: HELP.flashStrong,
         message: `最小発光量 ${powerLabel} でも ${formatStops(excessStops)}段 強すぎます。距離を ${recommended.toFixed(1)}m まで離すか ISO を下げてください` });
     }
   }
@@ -347,10 +407,10 @@ function manualShort(axis, stops, kind, hasND) {
   if (kind === 'short') {
     const axisRem = others.map((a, i) => (i === 0 ? 'ロックを外して ' : '') + inc[a]);
     const remedies = [hasND ? 'ND を1枚外す' : null, ...axisRem].filter(Boolean);
-    return { level: 'alert', icon: 'alert', message: `${axis} が ${N}段 足りません。${remedies.join('／')}` };
+    return { level: 'alert', icon: 'alert', helpId: HELP.calcClamp, message: `${axis} が ${N}段 足りません。${remedies.join('／')}` };
   }
   const axisRem = others.map((a, i) => (i === 0 ? 'ロックを外して ' : '') + dec[a]);
-  return { level: 'alert', icon: 'alert', message: `明るすぎます（${N}段超過）。${['ND を足す', ...axisRem].join('／')}` };
+  return { level: 'alert', icon: 'alert', helpId: HELP.calcClamp, message: `明るすぎます（${N}段超過）。${['ND を足す', ...axisRem].join('／')}` };
 }
 
 function manualResult(ev, st) {
@@ -421,13 +481,17 @@ export function compute(st) {
   const evScene = st.scene.evBase + st.scene.adjust;
   const flashOn = st.intent === 'daylightSync' || st.intent === 'slowSync';
   const prof = profileOf(st);
-  const modLoss = modLossOf(st.flash.modifier);
+  // 校正済みの組み合わせでは 0（実測 k が減光を含むため二重計上しない）
+  const modLoss = modLossFor(prof, st.flash.modifier);
   const d = {
     evScene, flashOn, warnings: [], badges: [],
     // 未校正バッジはストロボを使うときだけ意味を持つ（GN 推定に関わるため）。
-    uncalibrated: flashOn && !prof.calibrated,
+    // 校正はプロファイル×モディファイアごとなので、モディファイアを切り替えると追従する。
+    uncalibrated: flashOn && isUncalibrated(prof, st.flash.modifier),
+    filters: filterInfo(st),
   };
   if (d.uncalibrated) d.badges.push({ kind: 'est', text: '推定値（未校正）' });
+  attachedFilterWarnings(st, d);
 
   // 入口で「何が F/SS/ISO を決めるか」を一度だけ解決する。
   //   計算タブ  → state.manual（2ロック＋自動算出）
@@ -439,8 +503,20 @@ export function compute(st) {
   else computeSlow(st, evScene, prof, modLoss, d);
 
   d.equiv = equivalentList(evScene, st, d.mainFIndex);
-  if (d.warnings.length === 0) d.warnings.push({ level: 'info', icon: 'info', message: 'この設定で撮れます' });
+  if (d.warnings.length === 0) d.warnings.push({ level: 'info', icon: 'info', helpId: HELP.ok, message: 'この設定で撮れます' });
   return d;
+}
+
+/**
+ * 装着中フィルターの枚数警告。3枚以上でケラレ・周辺光量落ちの注意（ブラックミストも1枚）。
+ * @param {object} st @param {object} d
+ */
+function attachedFilterWarnings(st, d) {
+  const f = d.filters;
+  if (f.count >= 3) {
+    d.warnings.push({ level: 'warn', icon: 'nd', helpId: HELP.nd,
+      message: `フィルター${f.count}枚（${f.label}）。${st.focal}mm では周辺が落ちる可能性があります` });
+  }
 }
 
 /** アンビエント意図（ぼかす／止める／風景／夜手持ち）。 */
@@ -450,7 +526,7 @@ function computeAmbient(st, evScene, d) {
   const snapped = snapTriple(c.fReal, c.ssReal, c.isoReal);
   d.ambient = {
     fLabel: snapped.f.label, ssLabel: snapped.ss.label, isoLabel: snapped.iso.label,
-    ndLabel: ndLabelOf(st.nd),
+    ndLabel: d.filters.label,
   };
   d.mainFIndex = snapped.f.index;
   d.warnings.push(...c.warnings);
@@ -468,13 +544,13 @@ function computeManual(st, evScene, prof, modLoss, d) {
   d.manual = m;
   d.mainFIndex = m.f.index;
   d.ambient = {
-    fLabel: m.f.label, ssLabel: m.ss.label, isoLabel: m.iso.label, ndLabel: ndLabelOf(st.nd),
+    fLabel: m.f.label, ssLabel: m.ss.label, isoLabel: m.iso.label, ndLabel: d.filters.label,
   };
   if (m.warning) d.warnings.push(m.warning);
   let powerStops = null;
   if (d.flashOn) {
     // ストロボ側は SS に依存しない。manual の F/ISO と ND・距離だけで決まる。
-    const gnIso = applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), m.iso.real);
+    const gnIso = applyIso(applyModifier(gnBase(prof.ws, kFor(prof, st.flash.modifier)), modLoss), m.iso.real);
     const r = resolveFlashSide(st, prof, gnIso, m.f.real, ndStops(st), 0, d);
     d.flash = r.card;
     powerStops = r.powerStops;
@@ -490,7 +566,7 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   const dp = daylightSync({
     evScene, iso: camera.isoMin, comp: settings.comp, syncSpeedReal: camera.syncSpeed,
     ambientOffset: flash.ambientOffset, desiredN, ownedND: settings.ownedND,
-    ws: prof.ws, k: prof.k, modLoss, hssCapable: prof.hss, hssBaseLoss: settings.hssBaseLoss,
+    ws: prof.ws, k: kFor(prof, st.flash.modifier), modLoss, hssCapable: prof.hss, hssBaseLoss: settings.hssBaseLoss,
     baseISO: camera.isoMin, expandedISOMin: camera.expandedISOMin,
     maxSSReal: camera.maxSS, // SS 上限。超える要求はクランプし達成可能な背景段数を返す
   });
@@ -514,7 +590,7 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   d.paths = { nd: null, hss: null };
   if (dp.ndPath) {
     // ND 経路を主案として、発光量モードに応じて発光量 or 距離を解く
-    const gnIso = applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), camera.isoMin);
+    const gnIso = applyIso(applyModifier(gnBase(prof.ws, kFor(prof, st.flash.modifier)), modLoss), camera.isoMin);
     const r = resolveFlashSide(st, prof, gnIso, desiredN, dp.ndPath.totalStops, 0, d);
     powerStops = r.powerStops;
     d.flash = r.card;
@@ -539,7 +615,7 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
     else if (adv < -0.1) d.paths.advantage = `HSS経路が${formatStops(-adv)}段有利`;
   }
   if (!dp.ndPath && !dp.hssPath) {
-    d.warnings.push({ level: 'alert', icon: 'alert', message: '同調速度の壁を越えられません。F を絞ってください' });
+    d.warnings.push({ level: 'alert', icon: 'alert', helpId: HELP.syncWall, message: '同調速度の壁を越えられません。F を絞ってください' });
   }
 
   d.ruler = { deviation: 0, tracks: buildTracks(ambSnap, powerStops) };
@@ -570,11 +646,11 @@ function computeSlow(st, evScene, prof, modLoss, d) {
   const ambSnap = { f: snap(F, desiredN), ss: amb.ss, iso: snap(ISO, iso) };
   d.ambient = {
     fLabel: ambSnap.f.label, ssLabel: ambSnap.ss.label, isoLabel: ambSnap.iso.label,
-    ndLabel: ndLabelOf(st.nd), offset: flash.ambientOffset,
+    ndLabel: d.filters.label, offset: flash.ambientOffset,
   };
 
   // ストロボ側（発光量モードに応じて発光量 or 距離を解く。SS には依存しない）
-  const gnIso = applyIso(applyModifier(gnBase(prof.ws, prof.k), modLoss), iso);
+  const gnIso = applyIso(applyModifier(gnBase(prof.ws, kFor(prof, st.flash.modifier)), modLoss), iso);
   const { powerStops, card } = resolveFlashSide(st, prof, gnIso, desiredN, nd, 0, d);
   d.flash = card;
 
@@ -584,10 +660,10 @@ function computeSlow(st, evScene, prof, modLoss, d) {
 
   // 後幕シンクロ推奨（SS < 1/60）
   if (amb.ssReal > 1 / 60) {
-    d.warnings.push({ level: 'info', icon: 'info', message: '後幕シンクロ推奨。被写体が動くと残像が出ます' });
+    d.warnings.push({ level: 'info', icon: 'info', helpId: HELP.slowSync, message: '後幕シンクロ推奨。被写体が動くと残像が出ます' });
   }
   if (powerStops === 0) {
-    d.warnings.push({ level: 'info', icon: 'flash', message: 'フル発光に近く、連写ではチャージが追いつきません' });
+    d.warnings.push({ level: 'info', icon: 'flash', helpId: HELP.recycle, message: 'フル発光に近く、連写ではチャージが追いつきません' });
   }
 
   d.ruler = { deviation: 0, tracks: buildTracks(ambSnap, powerStops) };

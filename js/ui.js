@@ -14,7 +14,7 @@ import { SCENES, SUBJECTS, MODIFIERS, POWER_STEPS } from './scenes.js';
 import { F, SS, ISO } from './stops.js';
 import { calibrate } from './flash.js';
 import { makeWheel } from './wheel.js';
-import { defaultState, clone, mergeDeep } from './state.js';
+import { defaultState, clone, mergeDeep, migrate } from './state.js';
 import * as storage from './storage.js';
 
 /* ---- 選択肢（UI仕様 §3）---------------------------------------------- */
@@ -37,6 +37,7 @@ let derived = null;
 const el = {}; // 要素参照キャッシュ（index.html の固定要素）
 const wheels = { ruler: {}, calc: {} }; // 共有ホイールのコントローラ
 let rulerScaleTrack = null, rulerClipL = null, rulerClipR = null;
+let manualShownId = null; // いま表示しているマニュアルのセクション（再スクロールの判定用）
 let calcNdSuffix = null, calcNdSig = null;
 
 /* ====================================================================== */
@@ -48,10 +49,13 @@ let calcNdSuffix = null, calcNdSig = null;
  * @param {object|null} loaded storage.load() の結果
  */
 export function init(loaded) {
-  state = mergeDeep(clone(defaultState), loaded || {});
+  // 旧スキーマの保存データを移送してから既定値とマージする（MAINTENANCE.md §9）
+  const { state: migrated, notice } = migrate(loaded);
+  state = mergeDeep(clone(defaultState), migrated || {});
   cacheElements();
   buildStaticDom();
   wireEvents();
+  if (notice) setTimeout(() => toast(notice), 0); // 移行は一度だけ通知する
   // 初回描画も setState 経由に一本化。ただし保存はしない：
   // load 失敗で既定値へフォールバックした直後に保存すると校正値を復旧不能に上書きするため。
   setState({}, { persist: false });
@@ -68,6 +72,7 @@ function cacheElements() {
     'result-badges', 'ev-ruler', 'result-systems', 'path-compare', 'warnings', 'toast',
     'calc-ev', 'calc-ev-err', 'calc-nd-chips', 'calc-tracks', 'equiv-list', 'settings-root',
     'power-chips', 'power-hint',
+    'manual', 'manual-open', 'manual-close', 'manual-index', 'manual-body',
   ];
   ids.forEach((id) => { el[id.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = document.getElementById(id); });
   el.tabButtons = Array.from(document.querySelectorAll('.tab'));
@@ -131,8 +136,12 @@ function buildStaticDom() {
   buildSettings();
 }
 
-/** 発光量チップの選択肢：おまかせ＋ 1/8〜1/128（プロファイルの最小発光量まで）。 */
-const POWER_CHOICES = [3, 4, 5, 6, 7]; // 1/8, 1/16, 1/32, 1/64, 1/128
+/**
+ * 発光量チップの選択肢：おまかせ＋ 1/4〜1/128（プロファイルの最小発光量まで）。
+ * 1/2（1/400）と 1/1（1/250）はチップに出さない。閃光時間が被写体ブレの領域に入るため、
+ * それらは「おまかせ」経由でのみ到達させる（マニュアル §10・閃光時間の表は §9）。
+ */
+const POWER_CHOICES = [2, 3, 4, 5, 6, 7]; // 1/4, 1/8, 1/16, 1/32, 1/64, 1/128
 let powerChipSig = null;
 
 function buildPowerChips() {
@@ -228,6 +237,59 @@ function wireEvents() {
   // その他 数値入力（blur で検証・クランプ。空・非数値は直前値へ）
   el.focalOther.querySelector('input').addEventListener('blur', (e) => commitOther('focal', e.target));
   el.distanceOther.querySelector('input').addEventListener('blur', (e) => commitOther('distance', e.target));
+
+  wireManual();
+}
+
+/* ---- マニュアル（全画面シート。manual.md §0.3）----------------------- */
+
+/** シートを開く前のフォーカス元。閉じたときここへ戻す。 */
+let manualReturnFocus = null;
+
+function wireManual() {
+  el.manualOpen.addEventListener('click', () => setState({ ui: { manual: 'help-intro' } }));
+  el.manualClose.addEventListener('click', () => setState({ ui: { manual: null } }));
+  // 警告の ? → 該当セクションを開く（イベント委譲。再描画で作り直されるため）
+  el.warnings.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-help]');
+    if (b) setState({ ui: { manual: b.dataset.help } });
+  });
+  // 目次はページ内リンク。履歴を汚さずスクロールだけする（§0.4）
+  el.manualIndex.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href^="#"]');
+    if (!a) return;
+    e.preventDefault();
+    scrollManualTo(a.getAttribute('href').slice(1));
+  });
+  // Esc で閉じる／Tab をシート内に閉じ込める（§0.3）
+  el.manual.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); setState({ ui: { manual: null } }); return; }
+    if (e.key !== 'Tab') return;
+    const f = el.manual.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])');
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
+  // 背景のスワイプダウンで閉じる（§0.3）
+  let touchStartY = null;
+  el.manual.addEventListener('touchstart', (e) => {
+    touchStartY = el.manualBody.scrollTop <= 0 ? e.touches[0].clientY : null;
+  }, { passive: true });
+  el.manual.addEventListener('touchend', (e) => {
+    if (touchStartY == null) return;
+    const dy = e.changedTouches[0].clientY - touchStartY;
+    touchStartY = null;
+    if (dy > 80) setState({ ui: { manual: null } });
+  });
+}
+
+/** 指定セクションを最上部に表示する。reduced-motion では即時。 */
+function scrollManualTo(id) {
+  const target = document.getElementById(id);
+  if (!target) return;
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  target.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
 }
 
 /** ラジオグループ共通：クリックで選択、左右キーで移動。data-key を渡す。 */
@@ -304,6 +366,40 @@ function render() {
   renderResult();
   renderCalc();
   renderSettings();
+  renderManual();
+}
+
+/**
+ * マニュアルシートの開閉。state.ui.manual だけを見る（再描画経路は setState 一本）。
+ * アンカー指定で開いたときは目次を飛ばして該当セクションを最上部に出す（§0.4）。
+ */
+function renderManual() {
+  const id = state.ui.manual;
+  const wasOpen = !el.manual.hidden;
+  const open = !!id;
+  if (open === wasOpen) {
+    if (open && id !== manualShownId) { manualShownId = id; scrollManualTo(id); }
+    return;
+  }
+  document.body.classList.toggle('sheet-open', open);
+  if (open) {
+    manualReturnFocus = document.activeElement;
+    el.manual.hidden = false;
+    manualShownId = id;
+    // 下から出す（transform のみ。reduced-motion では CSS 側で 0s になる）
+    el.manual.classList.add('is-entering');
+    requestAnimationFrame(() => {
+      el.manual.classList.remove('is-entering');
+      el.manualClose.focus();
+      if (id !== 'help-intro') scrollManualTo(id);
+      else el.manualBody.scrollTop = 0;
+    });
+  } else {
+    el.manual.hidden = true;
+    manualShownId = null;
+    if (manualReturnFocus && document.contains(manualReturnFocus)) manualReturnFocus.focus();
+    manualReturnFocus = null;
+  }
 }
 
 function renderTheme() {
@@ -493,6 +589,10 @@ function buildCalcNd() {
   // チップ本体は所有ND設定に応じて renderCalc→rebuildCalcNdIfNeeded で組む
   el.calcNdChips.addEventListener('click', (e) => {
     const c = e.target.closest('[data-key]'); if (!c) return;
+    if (c.dataset.key === 'mist') { // 光学フィルター（減光0段だが枚数に数える）
+      setState({ filters: { blackMist: !state.filters.blackMist } });
+      return;
+    }
     const stops = Number(c.dataset.key);
     const set = new Set(state.nd);
     set.has(stops) ? set.delete(stops) : set.add(stops);
@@ -512,12 +612,19 @@ function rebuildCalcNdIfNeeded() {
   const sig = state.settings.ownedND.join(',');
   if (sig === calcNdSig) return;
   calcNdSig = sig;
-  el.calcNdChips.querySelectorAll('.chip-nd').forEach((c) => c.remove());
+  el.calcNdChips.querySelectorAll('.chip-nd, .chip-sep').forEach((c) => c.remove());
   state.settings.ownedND.forEach((stops) => {
     const c = chipEl(String(stops), `ND${2 ** stops}`);
     c.classList.add('chip-nd'); c.setAttribute('role', 'checkbox'); c.removeAttribute('aria-checked');
     el.calcNdChips.insertBefore(c, calcNdSuffix);
   });
+  // ND と光学フィルターの境界（見た目で区別する）
+  const sep = document.createElement('span');
+  sep.className = 'chip-sep'; sep.setAttribute('aria-hidden', 'true');
+  el.calcNdChips.insertBefore(sep, calcNdSuffix);
+  const mist = chipEl('mist', 'ブラックミスト');
+  mist.classList.add('chip-nd', 'chip-optical'); mist.setAttribute('role', 'checkbox');
+  el.calcNdChips.insertBefore(mist, calcNdSuffix);
 }
 
 function buildCalcTracks() {
@@ -556,11 +663,17 @@ function renderCalc() {
   if (state.ui.tab !== 'calc') return; // 非表示タブは更新省略
   if (document.activeElement !== el.calcEv) el.calcEv.value = derived.evScene.toFixed(1);
   rebuildCalcNdIfNeeded();
-  const sum = state.nd.reduce((a, b) => a + b, 0);
   el.calcNdChips.querySelectorAll('[data-key]').forEach((c) => {
-    c.setAttribute('aria-checked', String(state.nd.includes(Number(c.dataset.key))));
+    const on = c.dataset.key === 'mist'
+      ? state.filters.blackMist
+      : state.nd.includes(Number(c.dataset.key));
+    c.setAttribute('aria-checked', String(on));
   });
-  calcNdSuffix.textContent = sum ? `合計 ${sum}段（−${sum}EV）` : '装着なし';
+  // 合計段数は derived（compute の結果）を読む。ブラックミストは既定0段なので影響しない
+  const f = derived.filters;
+  calcNdSuffix.textContent = f.count
+    ? `${f.label}／合計 ${formatStops(f.ndStops)}段`
+    : '装着なし';
   const m = derived.manual; if (!m) return;
   ['f', 'ss', 'iso'].forEach((key) => {
     const locked = key !== m.computedKey;
@@ -602,6 +715,8 @@ const FLAT_SETTINGS = [
   { group: 0, path: 'camera.syncSpeed', label: '同調速度 (1/x秒)', kind: 'recip', min: 30, max: 500 },
   { group: 2, path: 'settings.hssBaseLoss', label: 'HSS基準損失(段)', kind: 'num', min: 1, max: 2.5 },
   { group: 2, path: 'settings.ambientOffsetDefault', label: '既定アンビエント段数', kind: 'num', min: -3, max: 1 },
+  // ブラックミストは公称ほぼ減光なし。実測で微小な減光がある場合に備えて調整可
+  { group: 2, path: 'settings.blackMistStops', label: 'ブラックミスト減光(段)', kind: 'num', min: 0, max: 1 / 3 },
 ];
 const OWNED_ND_ALL = [1, 2, 3, 4];
 
@@ -621,6 +736,7 @@ function buildSettings() {
   const g2 = settingsGroup('その他');
   FLAT_SETTINGS.filter((f) => f.group === 2).forEach((f) => g2.appendChild(settingRow(f)));
   g2.appendChild(ownedNdRow());
+  g2.appendChild(blackMistRow());
   const reset = document.createElement('button');
   reset.type = 'button'; reset.className = 'btn btn-ghost btn-block'; reset.textContent = '初期値に戻す';
   reset.style.marginTop = '8px';
@@ -675,7 +791,10 @@ function profileCard(p, i) {
     <div class="toggle-field"><span class="field-label">HSS 対応</span>
       <button type="button" class="toggle" data-pfield="hss" role="switch" aria-checked="${p.hss}" aria-label="HSS対応"><span class="toggle-knob"></span></button></div>`;
   const cal = document.createElement('button');
-  cal.type = 'button'; cal.className = 'btn btn-ghost btn-block'; cal.textContent = p.calibrated ? 'テスト撮影で再校正' : 'テスト撮影で校正';
+  // 校正はプロファイル×モディファイアごと。いま選んでいるモディファイアが対象になる。
+  const calibratedNow = p.cal && p.cal[state.flash.modifier] != null;
+  cal.type = 'button'; cal.className = 'btn btn-ghost btn-block';
+  cal.textContent = calibratedNow ? 'このモディファイアで再校正' : 'テスト撮影で校正';
   cal.addEventListener('click', () => toggleCalibration(card, i));
   card.appendChild(cal);
   // プロファイル各項目の変更配線
@@ -736,7 +855,9 @@ function runCalibration(form, i) {
   const powerX = get('power') || 1;
   const powerStops = clamp(Math.round(Math.log2(powerX)), 0, 10);
   const { k } = calibrate({ ws: state.profiles[i].ws, distance, fAperture, iso, powerStops });
-  updateProfile(i, { k: clamp(k, 2.0, 6.0), calibrated: true });
+  // 実測 k はモディファイアごとに保存する（切り替えても正確なまま／未校正の組み合わせはバッジが出る）
+  const mod = state.flash.modifier;
+  updateProfile(i, { cal: { ...(state.profiles[i].cal || {}), [mod]: clamp(k, 2.0, 6.0) } });
   toast(`校正しました：k = ${k.toFixed(2)}`);
 }
 
@@ -759,8 +880,29 @@ function ownedNdRow() {
   return row;
 }
 
+/**
+ * 「ブラックミストを常時装着」。レンズに付いているかどうかは機材の事実で、
+ * タブによって変わらないので設定タブに置く（計算タブのトグルと同じ state を見る）。
+ */
+function blackMistRow() {
+  const row = document.createElement('div');
+  row.className = 'field toggle-field';
+  const label = document.createElement('span');
+  label.className = 'field-label';
+  label.textContent = 'ブラックミストを常時装着';
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'toggle'; btn.id = 'black-mist-toggle';
+  btn.setAttribute('role', 'switch'); btn.setAttribute('aria-label', 'ブラックミストを常時装着');
+  btn.innerHTML = '<span class="toggle-knob"></span>';
+  btn.addEventListener('click', () => setState({ filters: { blackMist: !state.filters.blackMist } }));
+  row.append(label, btn);
+  return row;
+}
+
 function renderSettings() {
   if (state.ui.tab !== 'settings') return;
+  const mist = el.settingsRoot.querySelector('#black-mist-toggle');
+  if (mist) mist.setAttribute('aria-checked', String(state.filters.blackMist));
   el.settingsRoot.querySelectorAll('input[data-path]').forEach((input) => {
     if (input === document.activeElement) return;
     const spec = FLAT_SETTINGS.find((f) => f.path === input.dataset.path);
@@ -825,9 +967,15 @@ function pathHtml(p) {
 }
 
 function warnHtml(w) {
+  // helpId を持つ警告にはマニュアルへ飛ぶ ? を付ける（manual.md §0.5）
+  const help = w.helpId
+    ? `<button type="button" class="warn-help" data-help="${w.helpId}" aria-label="この警告の説明を開く">
+         <svg class="icon" aria-hidden="true"><use href="#i-help"></use></svg>
+       </button>`
+    : '';
   return `<div class="warn-item ${w.level}">
     <svg class="icon" aria-hidden="true"><use href="#i-${w.icon}"></use></svg>
-    <span>${w.message}</span>
+    <span>${w.message}</span>${help}
   </div>`;
 }
 

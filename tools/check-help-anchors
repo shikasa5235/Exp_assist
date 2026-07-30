@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# 警告の helpId が index.html のアンカーとして実在するかを検査する。
+#
+#   使い方（リポジトリのルートで）:  bash tools/check-help-anchors
+#   欠落が1件でもあれば終了コード 1。
+#
+# なぜ必要か：tests.html は helpId が対応表にあることまでしか検証できない
+# （DOM を見ないため）。index.html 側に <a id="help-xxxx"> が無ければ
+# `?` ボタンを押しても飛べないが、その不具合はテストでは赤くならない。
+# MAINTENANCE.md §8 の「ここは目視」を置き換えるための機械検証。
+#
+# 検査の向き：
+#   docs/exposure-app-manual.md §0.5 の対応表（正典）→ index.html の id
+#   本文にしかない見出しアンカーは検査しない（未参照のセクションは害がない）。
+set -u
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$ROOT" || return 2 2>/dev/null || exit 2
+
+MANUAL=docs/exposure-app-manual.md
+HTML=index.html
+for f in "$MANUAL" "$HTML"; do
+  if [ ! -f "$f" ]; then
+    echo "ERROR: $f が見つかりません（$ROOT で実行してください）"
+    return 2 2>/dev/null || exit 2
+  fi
+done
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# 1) 対応表（§0.5）から helpId を抽出。表の範囲だけを見る。
+sed -n '/^### 警告 → セクション 対応表/,/^## 0\.6/p' "$MANUAL" \
+  | grep -oE '`help-[a-z0-9-]+`' | tr -d '`' | sort -u > "$TMP/wanted.txt"
+
+# 2) index.html に実在する id を抽出（id="help-xxx" / id='help-xxx'）
+grep -oE "id=[\"']help-[a-z0-9-]+[\"']" "$HTML" \
+  | sed -E "s/id=[\"']//; s/[\"']$//" | sort -u > "$TMP/have.txt"
+
+n_want=$(wc -l < "$TMP/wanted.txt")
+if [ "$n_want" -eq 0 ]; then
+  echo "ERROR: $MANUAL §0.5 の対応表から helpId を抽出できませんでした"
+  return 2 2>/dev/null || exit 2
+fi
+
+missing=$(comm -23 "$TMP/wanted.txt" "$TMP/have.txt")
+n_have=$(wc -l < "$TMP/have.txt")
+if [ -n "$missing" ]; then
+  echo "NG: index.html にアンカーが無い helpId（$(printf '%s\n' "$missing" | wc -l) 件 / 要求 $n_want 件）"
+  printf '%s\n' "$missing" | sed 's/^/  MISSING: /'
+  echo "  → マニュアル本文を index.html に写すとき（manual.md §0.2 の構造）に <a id=\"…\"> を付ける"
+  exit 1
+fi
+
+echo "OK: 対応表の helpId $n_want 件すべてが index.html に実在（html 側の id $n_have 件）"
+exit 0
