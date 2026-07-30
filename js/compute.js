@@ -16,6 +16,10 @@ import { SUBJECTS, MODIFIERS, POWER_STEPS, HELP } from './scenes.js';
 
 const SLOWEST = 2 ** (-SS.minIndex / 3); // 系列最遅（= 30″ の実体 32 秒）
 const F8 = 8; // 風景の固定F値
+/** 等価露出一覧の F値（2段刻みの3つ）。F2.8 / F5.6 / F11 に対応する 1/3段インデックス。 */
+const EQUIV_F_INDEXES = [9, 15, 21];
+/** 回折の閾値。「F11 を超えたら」なので F11 自身（実体 11.31）では出さない。 */
+const DIFFRACTION_F_INDEX = 21;
 
 /* ---- 小さな純粋ヘルパー ------------------------------------------------ */
 
@@ -46,6 +50,15 @@ function filterInfo(st) {
     label: parts.join(' + '), // ND と光学フィルターを分けて表記
     ndStops: ndStops(st),
   };
+}
+
+/**
+ * 使える最も低い ISO。拡張ISO のトグルが OFF ならベースISO、ON なら拡張下限。
+ * 意図別ロジックの起点・クランプの下限・日中シンクロで使う ISO のすべてに効く。
+ * @param {object} st @returns {number}
+ */
+function isoFloorOf(st) {
+  return st.camera.allowExpandedIso ? st.camera.expandedISOMin : st.camera.isoMin;
 }
 
 /** 使用中プロファイル＋モディファイアの実測 k（未校正なら推定値の k）。 */
@@ -98,12 +111,12 @@ function snapTriple(fReal, ssReal, isoReal) {
 function intentBlur(ev, st) {
   const { lens, camera, focal, settings } = st;
   const nd = ndStops(st), comp = settings.comp, fReal = lens.fMin;
-  let iso = camera.isoMin;
+  let iso = isoFloorOf(st);
   let ss = solveSS(ev, iso, fReal, comp, nd);
   const limit = handShakeLimit(focal, camera.isStops);
   if (ss > limit) { // 遅すぎる → ISO を上げて SS を稼ぐ
     const need = Math.log2(ss / limit);
-    iso = Math.min(camera.isoMax, camera.isoMin * 2 ** need);
+    iso = Math.min(camera.isoMax, isoFloorOf(st) * 2 ** need);
     ss = solveSS(ev, iso, fReal, comp, nd);
   }
   return { fReal, ssReal: ss, isoReal: iso };
@@ -116,8 +129,8 @@ function intentFreeze(ev, st) {
   const req = subjectSSOf(subject);
   if (req == null) return intentBlur(ev, st); // 制約なしはぼかし相当
   const isoNeeded = solveISO(ev, fMin, req, comp, nd);
-  if (isoNeeded < camera.isoMin) { // 余る → 絞る
-    const iso = camera.isoMin;
+  if (isoNeeded < isoFloorOf(st)) { // 余る → 絞る
+    const iso = isoFloorOf(st);
     return { fReal: solveN(ev, iso, req, comp, nd), ssReal: req, isoReal: iso };
   }
   if (isoNeeded <= camera.isoMax) return { fReal: fMin, ssReal: req, isoReal: isoNeeded };
@@ -130,7 +143,7 @@ function intentFreeze(ev, st) {
 function intentLandscape(ev, st) {
   const { camera, settings } = st;
   const nd = ndStops(st), comp = settings.comp;
-  const iso = camera.isoMin;
+  const iso = isoFloorOf(st);
   return { fReal: F8, ssReal: solveSS(ev, iso, F8, comp, nd), isoReal: iso };
 }
 
@@ -140,7 +153,7 @@ function intentNight(ev, st) {
   const nd = ndStops(st), comp = settings.comp, fReal = lens.fMin;
   const limit = handShakeLimit(focal, camera.isStops);
   const isoNeeded = solveISO(ev, fReal, limit, comp, nd);
-  const iso = Math.max(camera.isoMin, Math.min(camera.isoMax, isoNeeded));
+  const iso = Math.max(isoFloorOf(st), Math.min(camera.isoMax, isoNeeded));
   const shortStops = isoNeeded > camera.isoMax ? Math.log2(isoNeeded / camera.isoMax) : 0;
   return { fReal, ssReal: limit, isoReal: iso, shortStops };
 }
@@ -193,7 +206,10 @@ function clampAmbient(r, st, ev) {
       message: `被写体が流れます。1/${Math.round(1 / req)} 以上にしてください` });
   }
   // 回折・高感度・三脚（情報）
-  if (fReal > 11) warnings.push({ level: 'info', icon: 'diffraction', helpId: HELP.diffraction, message: '回折で解像が落ち始めます' });
+  // 回折は「F11 を超えたら」。段位置で比べる（F11 の実体は 11.31 なので単純な > 11 では F11 自身が出る）
+  if (snap(F, fReal).index > DIFFRACTION_F_INDEX) {
+    warnings.push({ level: 'info', icon: 'diffraction', helpId: HELP.diffraction, message: '回折で解像が落ち始めます' });
+  }
   if (isoReal > camera.isoMax / 2) warnings.push({ level: 'info', icon: 'noise', helpId: HELP.highIso, message: 'ノイズが目立ち始める領域です' });
   if (ssReal >= 0.5) warnings.push({ level: 'info', icon: 'tripod', helpId: HELP.tripod, message: '三脚推奨（SS 1/2秒以上）' });
 
@@ -222,8 +238,8 @@ function alternatives(ev, st, primary) {
     if (!same(cand, primary)) out.push({ tag: 'ブレを避ける', ...snapTriple(cand.fReal, cand.ssReal, cand.isoReal) });
   }
   // 代替B：画質優先（ISOを1段下げ、SSを遅くして補う）
-  if (primary.isoReal > camera.isoMin * 1.9) {
-    const iso = Math.max(camera.isoMin, primary.isoReal / 2);
+  if (primary.isoReal > isoFloorOf(st) * 1.9) {
+    const iso = Math.max(isoFloorOf(st), primary.isoReal / 2);
     const ss = solveSS(ev, iso, primary.fReal, comp, nd);
     const cand = { fReal: primary.fReal, ssReal: ss, isoReal: iso };
     if (ss <= SLOWEST && !same(cand, primary)) out.push({ tag: '画質を優先', ...snapTriple(cand.fReal, cand.ssReal, cand.isoReal) });
@@ -365,29 +381,44 @@ function buildTracks(snapped, powerStops) {
 
 /* ---- 等価露出一覧（計算タブ）。仕様 §10.2 ---------------------------- */
 
+/**
+ * 等価露出の一覧。**F2.8 / F5.6 / F11 の3行固定（2段刻み）。**
+ * 6行（1段刻み）は結果パネル内でスクロールが必要になり現場で読めないため。
+ * 2段刻みなら「ぼかす・標準・パンフォーカス」の3択として一覧性が保てる。
+ * 開放より明るい行は**消さずに使用不可として示す**（3つ固定のほうが位置が安定し理由も伝わる）。
+ * @returns {Array<{fLabel,ssLabel,isoLabel,flags,isMain,disabled,reason}>}
+ */
 function equivalentList(ev, st, mainFIndex) {
   const { camera, lens, settings } = st;
   const nd = ndStops(st), comp = settings.comp;
-  const rows = [];
-  // F は1段刻み（開放F〜F16）。1段 = index 3 ステップ。同EV上でSSを算出、実用範囲のみ。
-  const fStart = Math.round(F.indexFor(lens.fMin) / 3) * 3; // 開放を含む1段グリッド
-  const fEnd = F.indexFor(16);
-  for (let fi = fStart; fi <= fEnd + 1e-6; fi += 3) {
+  const iso = isoFloorOf(st);
+  return EQUIV_F_INDEXES.map((fi) => {
     const fReal = F.real(fi);
-    const ss = solveSS(ev, camera.isoMin, fReal, comp, nd);
-    if (ss < camera.maxSS || ss > SLOWEST) continue; // 実用範囲外
-    const sf = snap(F, fReal), ss2 = snap(SS, ss), iso2 = snap(ISO, camera.isoMin);
-    const flags = [];
-    if (fReal > 11) flags.push('diffraction');
-    if (ss > handShakeLimit(st.focal, camera.isStops)) flags.push('shake');
-    rows.push({ fLabel: sf.label, ssLabel: ss2.label, isoLabel: iso2.label, flags, isMain: sf.index === mainFIndex });
-  }
-  if (rows.length > 9) { // 主案中心に前後を切る
-    const mi = Math.max(0, rows.findIndex((r) => r.isMain));
-    const start = Math.min(Math.max(0, mi - 4), rows.length - 9);
-    return rows.slice(start, start + 9);
-  }
-  return rows;
+    const sf = snap(F, fReal); // ラベルは表引き（実体と表示は別）
+    const ss = solveSS(ev, iso, fReal, comp, nd);
+    const row = {
+      fLabel: sf.label, ssLabel: snap(SS, ss).label, isoLabel: snap(ISO, iso).label,
+      flags: [], isMain: sf.index === mainFIndex, disabled: false, reason: '',
+    };
+    if (fReal < lens.fMin - 1e-9) {
+      row.disabled = true;
+      row.reason = `開放F${snap(F, lens.fMin).label}のため使用不可`;
+      row.ssLabel = '—'; row.isoLabel = '—';
+    } else if (ss < camera.maxSS) {
+      row.disabled = true;
+      row.reason = `SS上限（${snap(SS, camera.maxSS).label}）を超える`;
+    } else if (ss > SLOWEST) {
+      row.disabled = true;
+      row.reason = `30秒を超える`;
+    } else {
+      // 回折は「F11 を超えたら」。F11 の実体は 11.31 なので、段位置で比べて F11 自身は出さない。
+      // 現在の一覧3値（F2.8/F5.6/F11）では到達しない（F13 以上で発火）。
+      // 一覧値が可変になった場合に機能するため判定を保持する。仕様 §10.2 参照
+      if (sf.index > DIFFRACTION_F_INDEX) row.flags.push('diffraction');
+      if (ss > handShakeLimit(st.focal, camera.isStops)) row.flags.push('shake');
+    }
+    return row;
+  });
 }
 
 /* ---- 計算タブ：2ロック→残り1つを自動算出 ---------------------------- */
@@ -421,7 +452,7 @@ function manualResult(ev, st) {
   const computedKey = ['f', 'ss', 'iso'].find((k) => !L[k]) || 'ss';
   // ロック軸は保存済み index を使い、未確定なら既定値で補完（開放F・ベースISO）。
   let fReal = manual.fIndex != null ? F.real(manual.fIndex) : lens.fMin;
-  let isoReal = manual.isoIndex != null ? ISO.real(manual.isoIndex) : camera.isoMin;
+  let isoReal = manual.isoIndex != null ? ISO.real(manual.isoIndex) : isoFloorOf(st);
   let ssReal = manual.ssIndex != null ? SS.real(manual.ssIndex) : solveSS(ev, isoReal, fReal, comp, nd);
   // 非ロック軸を残り2軸から解く（連動）
   if (computedKey === 'ss') ssReal = solveSS(ev, isoReal, fReal, comp, nd);
@@ -564,10 +595,11 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   const { flash, lens, camera, settings } = st;
   const desiredN = lens.fMin; // 希望F=レンズ開放
   const dp = daylightSync({
-    evScene, iso: camera.isoMin, comp: settings.comp, syncSpeedReal: camera.syncSpeed,
+    evScene, iso: isoFloorOf(st), comp: settings.comp, syncSpeedReal: camera.syncSpeed,
     ambientOffset: flash.ambientOffset, desiredN, ownedND: settings.ownedND,
     ws: prof.ws, k: kFor(prof, st.flash.modifier), modLoss, hssCapable: prof.hss, hssBaseLoss: settings.hssBaseLoss,
     baseISO: camera.isoMin, expandedISOMin: camera.expandedISOMin,
+    allowExpandedIso: camera.allowExpandedIso, // ON のときは拡張ISOの提案を出さない（既に使っている）
     maxSSReal: camera.maxSS, // SS 上限。超える要求はクランプし達成可能な背景段数を返す
   });
   d.warnings.push(...dp.warnings);
@@ -579,7 +611,7 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
 
   // アンビエント側カード
   const ndPathLabel = dp.ndPath ? ndLabelOf(dp.ndPath.filters) : '';
-  const ambSnap = { f: snap(F, desiredN), ss: snap(SS, camera.syncSpeed), iso: snap(ISO, camera.isoMin) };
+  const ambSnap = { f: snap(F, desiredN), ss: snap(SS, camera.syncSpeed), iso: snap(ISO, isoFloorOf(st)) };
   d.ambient = {
     fLabel: ambSnap.f.label, ssLabel: ambSnap.ss.label, isoLabel: ambSnap.iso.label,
     ndLabel: ndPathLabel, offset: flash.ambientOffset,
@@ -590,7 +622,7 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   d.paths = { nd: null, hss: null };
   if (dp.ndPath) {
     // ND 経路を主案として、発光量モードに応じて発光量 or 距離を解く
-    const gnIso = applyIso(applyModifier(gnBase(prof.ws, kFor(prof, st.flash.modifier)), modLoss), camera.isoMin);
+    const gnIso = applyIso(applyModifier(gnBase(prof.ws, kFor(prof, st.flash.modifier)), modLoss), isoFloorOf(st));
     const r = resolveFlashSide(st, prof, gnIso, desiredN, dp.ndPath.totalStops, 0, d);
     powerStops = r.powerStops;
     d.flash = r.card;
@@ -626,13 +658,13 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
 function computeSlow(st, evScene, prof, modLoss, d) {
   const { flash, lens, camera, focal, settings, subject } = st;
   const desiredN = lens.fMin;
-  let iso = camera.isoMin;
+  let iso = isoFloorOf(st);
   const nd = ndStops(st);
   let amb = slowSyncAmbient({ evScene, iso, comp: settings.comp, N: desiredN, ambientOffset: flash.ambientOffset, nd });
   const limit = handShakeLimit(focal, camera.isStops);
 
   if (!flash.tripod && amb.ssReal > limit) { // 手持ちで手ブレ限界を割る → ISO を上げる
-    iso = Math.min(camera.isoMax, camera.isoMin * (amb.ssReal / limit));
+    iso = Math.min(camera.isoMax, isoFloorOf(st) * (amb.ssReal / limit));
     amb = slowSyncAmbient({ evScene, iso, comp: settings.comp, N: desiredN, ambientOffset: flash.ambientOffset, nd });
     const w = shakeWarning(amb.ssReal, focal, camera.isStops);
     if (w) d.warnings.push(w);

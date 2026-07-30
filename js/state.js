@@ -26,7 +26,12 @@ export const defaultState = {
   intent: 'blur',
   subject: 'walking',
   focal: 50,
-  camera: { syncSpeed: 1 / 250, maxSS: 1 / 8000, isoMin: 200, isoMax: 6400, isStops: 0, expandedISOMin: 50 },
+  // allowExpandedIso: false なら ISO の下限は isoMin(200)、true なら expandedISOMin(50)。
+  // 撮影ごとの判断（画質を取るか ND 枚数を減らすか）なので機材設定ではなく撮影タブに置く。
+  camera: {
+    syncSpeed: 1 / 250, maxSS: 1 / 8000, isoMin: 200, isoMax: 6400, isStops: 0,
+    expandedISOMin: 50, allowExpandedIso: false,
+  },
   lens: { fMin: 2.8, fMax: 22 },
   // powerMode: 'auto' = 発光量を計算で決める（従属変数）／'fixed' = ユーザーが選び「距離」を解く。
   // powerStops は fixed のときだけ使う（0=1/1 … 7=1/128。大きいほど弱い）。
@@ -48,7 +53,7 @@ export const defaultState = {
   ],
   settings: { hssBaseLoss: 2.0, ambientOffsetDefault: -1, ownedND: [1, 2, 3, 4], comp: 0, blackMistStops: 0 },
   // manual: null なら閉。'help-xxxx' ならそのセクションを開く（再描画経路を増やさないため state に置く）
-  ui: { tab: 'easy', theme: 'auto', firstRun: true, manual: null },
+  ui: { tab: 'easy', theme: 'auto', firstRun: true, manual: null, manualTray: false },
 };
 
 /** 深いコピー。 @template T @param {T} o @returns {T} */

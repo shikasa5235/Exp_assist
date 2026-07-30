@@ -339,6 +339,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .equiv-row:last-child { border-bottom: none; }
 .equiv-row.is-main { background: var(--sel); font-weight: 700; }
+/* 使用不可の行は消さずに残す（3行固定で位置が安定し、理由も伝わる）。色だけに頼らず文言を添える */
+.equiv-row.is-disabled { color: var(--ink-2); opacity: .7; grid-template-columns: 1fr 1fr 1fr auto; }
+.equiv-row.is-disabled .equiv-reason {
+  grid-column: 1 / -1; font-family: var(--font-text); font-size: 12px; color: var(--warn);
+}
 .equiv-flags { display: flex; gap: 4px; color: var(--ink-2); }
 .equiv-flags .icon { width: 14px; height: 14px; }
 .equiv-empty { padding: 16px; font-size: 13px; color: var(--ink-2); }
@@ -384,7 +389,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 /* ===== マニュアル（全画面シート。manual.md §0.3・§0.7）=========== */
 .sheet {
   position: fixed; inset: 0; z-index: 60;
-  display: flex; flex-direction: column;
+  display: flex; flex-direction: column; /* トレイの絶対配置の基準にもなる */
   background: var(--paper); color: var(--ink);
   padding-top: var(--sat);
   transform: translateY(0);
@@ -402,11 +407,26 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   width: var(--tap-min); height: var(--tap-min); border-radius: var(--r-chip); color: var(--ink-2);
 }
 .sheet-close:active { background: var(--press); }
-.manual-index {
-  flex: none; display: flex; flex-direction: column; gap: 0;
-  padding: 8px 16px 12px; border-bottom: 1px solid var(--rule);
-  max-height: 40vh; overflow-y: auto;
+/* 目次トレイ：左上固定。閉時は画面外へ transform で退避し、本文の上に被さる */
+.tray-toggle {
+  display: flex; align-items: center; justify-content: center;
+  width: var(--tap-min); height: var(--tap-min); margin-left: -8px;
+  border-radius: var(--r-chip); color: var(--ink-2);
 }
+.tray-toggle:active { background: var(--press); }
+.tray-toggle[aria-expanded="true"] { color: var(--flash); background: var(--sel); }
+.manual-index {
+  position: absolute; top: calc(var(--header-h) + var(--sat)); bottom: 0; left: 0;
+  z-index: 2; width: 50%; min-width: 200px;
+  display: flex; flex-direction: column; gap: 0;
+  padding: 8px 12px calc(16px + var(--sab));
+  background: var(--panel); border-right: 1px solid var(--rule);
+  box-shadow: 2px 0 12px var(--overlay);
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  transform: translateX(-100%);
+  transition: transform var(--dur-panel) var(--ease);
+}
+.manual-index.is-open { transform: translateX(0); }
 .manual-index a {
   display: flex; align-items: center; min-height: var(--tap-min);
   color: var(--ink); text-decoration: none; font-size: 15px;

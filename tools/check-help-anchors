@@ -42,14 +42,42 @@ if [ "$n_want" -eq 0 ]; then
   return 2 2>/dev/null || exit 2
 fi
 
-missing=$(comm -23 "$TMP/wanted.txt" "$TMP/have.txt")
 n_have=$(wc -l < "$TMP/have.txt")
+fail=0
+
+missing=$(comm -23 "$TMP/wanted.txt" "$TMP/have.txt")
 if [ -n "$missing" ]; then
   echo "NG: index.html にアンカーが無い helpId（$(printf '%s\n' "$missing" | wc -l) 件 / 要求 $n_want 件）"
-  printf '%s\n' "$missing" | sed 's/^/  MISSING: /'
-  echo "  → マニュアル本文を index.html に写すとき（manual.md §0.2 の構造）に <a id=\"…\"> を付ける"
+  printf '%s\n' "$missing" | sed 's/^/  MISSING(helpId): /'
+  fail=1
+fi
+
+# 3) マニュアル本文（§1 以降）の全アンカー ID が index.html に実在するか。
+#    警告から参照されないセクション（目次からのみ辿る）も含めて写し漏れを検出する。
+#    見出し数の一致では「1つ増えて1つ減る」ずれを見逃すため、ID を突き合わせる（§7）。
+start=$(grep -n '^# §1 ' "$MANUAL" | cut -d: -f1)
+if [ -z "$start" ]; then
+  echo "ERROR: $MANUAL に本文の開始（# §1）が見つかりません"
+  return 2 2>/dev/null || exit 2
+fi
+awk -v s="$start" 'NR>=s' "$MANUAL" \
+  | grep -oE 'id="help-[a-z0-9-]+"' | sed -E 's/id="//; s/"$//' | sort -u > "$TMP/body.txt"
+n_body=$(wc -l < "$TMP/body.txt")
+if [ "$n_body" -eq 0 ]; then
+  echo "ERROR: $MANUAL 本文からアンカー ID を抽出できませんでした"
+  return 2 2>/dev/null || exit 2
+fi
+missing_body=$(comm -23 "$TMP/body.txt" "$TMP/have.txt")
+if [ -n "$missing_body" ]; then
+  echo "NG: index.html に写されていない本文アンカー（$(printf '%s\n' "$missing_body" | wc -l) 件 / 本文 $n_body 件）"
+  printf '%s\n' "$missing_body" | sed 's/^/  MISSING(section): /'
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "  → マニュアル本文を index.html に写すとき（manual.md §0.2 の構造）に <a id=\"…\"> / id=\"…\" を付ける"
   exit 1
 fi
 
-echo "OK: 対応表の helpId $n_want 件すべてが index.html に実在（html 側の id $n_have 件）"
+echo "OK: helpId $n_want 件・本文アンカー $n_body 件のすべてが index.html に実在（html 側の id $n_have 件）"
 exit 0

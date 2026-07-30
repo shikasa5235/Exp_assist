@@ -72,7 +72,7 @@ function cacheElements() {
     'result-badges', 'ev-ruler', 'result-systems', 'path-compare', 'warnings', 'toast',
     'calc-ev', 'calc-ev-err', 'calc-nd-chips', 'calc-tracks', 'equiv-list', 'settings-root',
     'power-chips', 'power-hint',
-    'manual', 'manual-open', 'manual-close', 'manual-index', 'manual-body',
+    'manual', 'manual-open', 'manual-close', 'manual-index', 'manual-body', 'manual-tray-toggle',
   ];
   ids.forEach((id) => { el[id.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = document.getElementById(id); });
   el.tabButtons = Array.from(document.querySelectorAll('.tab'));
@@ -238,6 +238,11 @@ function wireEvents() {
   el.focalOther.querySelector('input').addEventListener('blur', (e) => commitOther('focal', e.target));
   el.distanceOther.querySelector('input').addEventListener('blur', (e) => commitOther('distance', e.target));
 
+  // 拡張ISO トグル（かんたん・計算の両方。同じ state を見るので双方向に連動する）
+  document.querySelectorAll('.exp-iso-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => setState({ camera: { allowExpandedIso: !state.camera.allowExpandedIso } }));
+  });
+
   wireManual();
 }
 
@@ -247,14 +252,17 @@ function wireEvents() {
 let manualReturnFocus = null;
 
 function wireManual() {
-  el.manualOpen.addEventListener('click', () => setState({ ui: { manual: 'help-intro' } }));
-  el.manualClose.addEventListener('click', () => setState({ ui: { manual: null } }));
+  // アンカー指定で開くときはトレイを閉じた状態にする（§0.4）
+  el.manualOpen.addEventListener('click', () => setState({ ui: { manual: 'help-intro', manualTray: false } }));
+  el.manualClose.addEventListener('click', () => setState({ ui: { manual: null, manualTray: false } }));
+  // 目次トレイの開閉（同じアイコンで展開・格納）
+  el.manualTrayToggle.addEventListener('click', () => setState({ ui: { manualTray: !state.ui.manualTray } }));
   // 警告の ? → 該当セクションを開く（イベント委譲。再描画で作り直されるため）
   el.warnings.addEventListener('click', (e) => {
     const b = e.target.closest('[data-help]');
     if (b) setState({ ui: { manual: b.dataset.help } });
   });
-  // 目次はページ内リンク。履歴を汚さずスクロールだけする（§0.4）
+  // 目次はページ内リンク。履歴を汚さずスクロールだけする。ジャンプ後もトレイは開いたまま（§0.4）
   el.manualIndex.addEventListener('click', (e) => {
     const a = e.target.closest('a[href^="#"]');
     if (!a) return;
@@ -377,6 +385,13 @@ function renderManual() {
   const id = state.ui.manual;
   const wasOpen = !el.manual.hidden;
   const open = !!id;
+  // 目次トレイ（state 駆動。閉じているときは Tab で辿れないようにする）
+  const trayOpen = open && !!state.ui.manualTray;
+  el.manualIndex.classList.toggle('is-open', trayOpen);
+  el.manualIndex.setAttribute('aria-hidden', String(!trayOpen));
+  el.manualTrayToggle.setAttribute('aria-expanded', String(trayOpen));
+  el.manualTrayToggle.setAttribute('aria-label', trayOpen ? '目次を閉じる' : '目次を開く');
+  el.manualIndex.querySelectorAll('a').forEach((a) => { a.tabIndex = trayOpen ? 0 : -1; });
   if (open === wasOpen) {
     if (open && id !== manualShownId) { manualShownId = id; scrollManualTo(id); }
     return;
@@ -447,6 +462,10 @@ function renderTab1() {
   // トグル
   el.tripodToggle.setAttribute('aria-checked', String(state.flash.tripod));
   el.curtainToggle.setAttribute('aria-checked', String(state.flash.curtain));
+  // 拡張ISO（かんたん・計算の両方に同じ state を反映）
+  document.querySelectorAll('.exp-iso-toggle').forEach((btn) => {
+    btn.setAttribute('aria-checked', String(state.camera.allowExpandedIso));
+  });
 
   // 可視/非可視
   const showSubject = state.intent === 'freeze' || state.intent === 'slowSync';
@@ -691,9 +710,12 @@ function equivHtml(rows) {
   if (!rows || !rows.length) {
     return '<div class="equiv-empty">この条件で成立する組み合わせがありません。ISO上限を上げるか、F値の範囲を広げてください</div>';
   }
-  return rows.map((r) => `<div class="equiv-row${r.isMain ? ' is-main' : ''}">
+  return rows.map((r) => `<div class="equiv-row${r.isMain ? ' is-main' : ''}${r.disabled ? ' is-disabled' : ''}">
     <span>F${r.fLabel}</span><span>${r.ssLabel}</span><span>ISO${r.isoLabel}</span>
+    <!-- 回折アイコン：現在の一覧3値（F2.8/F5.6/F11）では到達しない（F13 以上で発火）。
+         一覧値が可変になった場合に機能するため実装を保持する。仕様 §10.2 参照 -->
     <span class="equiv-flags">${r.flags.map((f) => `<svg class="icon" aria-hidden="true"><use href="#i-${f}"></use></svg>`).join('')}</span>
+    ${r.disabled ? `<span class="equiv-reason">${r.reason}</span>` : ''}
   </div>`).join('');
 }
 

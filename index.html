@@ -74,6 +74,9 @@
       <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <path d="M6 6l12 12M18 6L6 18"/>
       </symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 7h16M4 12h16M4 17h10"/>
+      </symbol>
       <symbol id="i-warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 3 2 20h20z"/><line x1="12" y1="9" x2="12" y2="14"/><circle cx="12" cy="17" r=".6"/>
       </symbol>
@@ -136,6 +139,12 @@
         <div class="field-label" id="lbl-intent">意図</div>
         <div class="chip-row" id="intent-chips" role="radiogroup" aria-labelledby="lbl-intent"></div>
       </div>
+      <!-- 拡張ISO：撮影ごとの判断（画質を取るか ND 枚数を減らすか）。ND とトレードオフ -->
+      <div class="field toggle-field">
+        <span class="field-label" id="lbl-exp-iso-easy">拡張ISO（50〜）を使う</span>
+        <button type="button" class="toggle exp-iso-toggle" role="switch" aria-checked="false"
+                aria-labelledby="lbl-exp-iso-easy"><span class="toggle-knob"></span></button>
+      </div>
       <div class="field" id="subject-field" hidden>
         <div class="field-label" id="lbl-subject">止めたい被写体</div>
         <div class="chip-row" id="subject-chips" role="radiogroup" aria-labelledby="lbl-subject"></div>
@@ -188,6 +197,12 @@
       <div class="field">
         <div class="field-label" id="lbl-calc-nd">ND 装着</div>
         <div class="chip-row" id="calc-nd-chips" role="group" aria-labelledby="lbl-calc-nd"></div>
+      </div>
+      <!-- ND の直下。拡張ISO を使うと必要な ND 枚数が減るというトレードオフを隣接で示す -->
+      <div class="field toggle-field">
+        <span class="field-label" id="lbl-exp-iso-calc">拡張ISO（50〜）を使う</span>
+        <button type="button" class="toggle exp-iso-toggle" role="switch" aria-checked="false"
+                aria-labelledby="lbl-exp-iso-calc"><span class="toggle-knob"></span></button>
       </div>
       <div class="calc-tracks" id="calc-tracks" aria-label="F/SS/ISO ホイール">
         <!-- ui.js が3本のロック付きホイールを差し込む -->
@@ -243,11 +258,15 @@
        表は 320px で横スクロールしないよう2列に収めている。 -->
   <div id="manual" class="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="manual-title">
     <header class="sheet-head">
+      <button type="button" class="tray-toggle" id="manual-tray-toggle" aria-label="目次を開く" aria-expanded="false" aria-controls="manual-index">
+        <svg class="icon" aria-hidden="true"><use href="#i-menu"></use></svg>
+      </button>
       <h2 id="manual-title">使い方</h2>
       <button type="button" class="sheet-close" id="manual-close" aria-label="閉じる">
         <svg class="icon" aria-hidden="true"><use href="#i-close"></use></svg>
       </button>
     </header>
+    <!-- 目次は左上固定のトレイ。本文をスクロールしても追従し、本文の上に被さる -->
     <nav class="manual-index" id="manual-index" aria-label="目次">
       <a href="#help-intro">1 このアプリについて</a>
       <a href="#help-setup">2 最初にやること</a>
@@ -567,11 +586,20 @@
         所有しているフィルターは設定タブで変更できます。買い足したら追加してください。</p>
         <h4>枚数を減らしたい理由</h4>
         <p>ガラスを重ねるほど<strong>ケラレ・色被り・フレア</strong>が増えます。特に広角では周辺が暗くなります。3枚以上になると警告が出ます。</p>
-        <h4>2枚必要になったときの代案</h4>
+        <h4>2枚必要になったときの代案 — 拡張ISO トグル</h4>
         <p>ベースISO200のカメラで5段必要になると、ND2+ND16 の2枚重ねになります。
-        このとき <strong>「拡張ISO（ISO100 や 50）まで下げればND1枚で済む」</strong> という案が出ます。</p>
-        <p>拡張ISOは階調やノイズで不利になる場合があります。ガラス2枚の光学的な劣化と、
-        拡張ISOの画質低下、どちらを取るかの判断です。<strong>アプリは両方を出すだけで、選びません。</strong></p>
+        このとき <strong>「拡張ISO（50〜）を使えば ND 1枚で済みます」</strong> という案が出ます。</p>
+        <p>ND チップの下にある <strong>「拡張ISO（50〜）を使う」</strong> トグルを入れると、ISOの下限が
+        ベースISO（200）から拡張下限（50）まで広がります。<strong>ISO を2段下げられるぶん、
+        必要な ND が2段減ります。</strong></p>
+        <table><tbody>
+          <tr><th>OFF（既定）</th><td>ISOの下限はベースISO 200。ND は多く必要（例：5段＝2枚）</td></tr>
+          <tr><th>ON</th><td>ISOの下限は拡張下限 50。ND は少なくて済む（例：3段＝1枚）</td></tr>
+        </tbody></table>
+        <p><strong>ガラスを重ねるか、拡張ISOの画質低下を取るかのトレードオフです。</strong>
+        拡張ISOは階調やノイズで不利になる場合があります。<strong>アプリは両方を出すだけで、選びません。</strong></p>
+        <p>トグルを入れている間は「拡張ISOを使えば…」の案内は出ません（すでに使っているため）。
+        かんたんタブと計算タブの両方に同じトグルがあり、どちらから変えても連動します。</p>
         <h4>NDはストロボにも効く</h4>
         <p>5 のとおりです。ND4（2段）を付けたら、ストロボの発光量も2段上げる必要があります。
         アプリは自動で計算に入れているので、表示された発光量に従ってください。</p>
@@ -633,8 +661,17 @@
         鍵を開けて別の組み合わせに変えれば、そちらが計算されます。</p>
         <p>シーンのEVはかんたんタブから引き継がれます。直接入力もできます。</p>
         <h4>等価露出の一覧</h4>
-        <p>下部に<strong>同じ明るさになる組み合わせ</strong>が並びます。F値の開放側から絞り側へ、1段刻みです。
-        各行に小さな警告アイコンが付きます。</p>
+        <p>下部に<strong>同じ明るさになる組み合わせ</strong>が3つ並びます。<strong>F2.8 / F5.6 / F11 の2段刻み</strong>です。</p>
+        <table><tbody>
+          <tr><th>F2.8</th><td>背景をぼかす</td></tr>
+          <tr><th>F5.6</th><td>標準</td></tr>
+          <tr><th>F11</th><td>パンフォーカス</td></tr>
+        </tbody></table>
+        <p>3つに絞ってあるので、結果パネル内でスクロールせずに読めます。</p>
+        <p><strong>開放F値がその行より暗いレンズ</strong>（例：開放F4.0）では、F2.8 の行は
+        「開放F4.0のため使用不可」と表示されます。行は消えません。位置が動かないほうが読みやすく、
+        なぜ使えないのかも分かるためです。</p>
+        <p>各行に小さな警告アイコンが付きます。</p>
         <table><tbody>
           <tr><th>手ブレ</th><td>この行のSSでは手ブレしやすい</td></tr>
           <tr><th>回折</th><td>F値が絞りすぎで解像が落ちる</td></tr>

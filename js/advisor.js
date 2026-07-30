@@ -121,8 +121,9 @@ export function freezeWarning(durationReal, subjectSSReal) {
 export function ndCountWarnings(nd, ctx) {
   const out = [];
   if (!nd || nd.count < 1) return out;
-  const { baseISO, expandedISOMin, ownedND, wallStops } = ctx;
-  if (nd.count >= 2) {
+  const { baseISO, expandedISOMin, ownedND, wallStops, allowExpandedIso = false } = ctx;
+  // 拡張ISO が既に ON なら「使えば減る」という提案は成り立たない
+  if (nd.count >= 2 && !allowExpandedIso) {
     const drop = Math.log2(baseISO / expandedISOMin);
     const reducedWall = wallStops - drop;
     const reduced = reducedWall <= 0 ? { count: 0 } : solveND(ownedND, Math.ceil(reducedWall - 1e-9));
@@ -134,7 +135,8 @@ export function ndCountWarnings(nd, ctx) {
       level: 'info',
       icon: 'nd',
       helpId: HELP.nd,
-      message: `ISO を拡張下限（${expandedISOMin}）まで下げれば${tail}（画質低下の可能性あり）`,
+      // トグルを入れれば解決する、という具体的な行動を指す文言にする
+      message: `拡張ISO（${expandedISOMin}〜）を使えば${tail}（画質低下の可能性あり）`,
     });
   }
   if (nd.count >= 3) {
@@ -173,7 +175,7 @@ export function daylightSync(p) {
     evScene, iso, comp = 0, syncSpeedReal, ambientOffset = 0,
     desiredN = null, ownedND = [], ws, k = 4.0, modLoss = 0,
     hssCapable = true, hssBaseLoss = 2.0, baseISO, expandedISOMin,
-    maxSSReal = null,
+    maxSSReal = null, allowExpandedIso = false,
   } = p;
 
   const evT = evTarget(evScene, iso, comp, 0);
@@ -196,7 +198,7 @@ export function daylightSync(p) {
   if (nd) {
     const gnEff = effectiveGN(gnIso, 0, nd.totalStops, 0);
     out.ndPath = { ...nd, ssReal: syncSpeedReal, ss: snap(SS, syncSpeedReal), gnEff, reach: gnEff / desiredN };
-    out.warnings.push(...ndCountWarnings(nd, { baseISO, expandedISOMin, ownedND, wallStops }));
+    out.warnings.push(...ndCountWarnings(nd, { baseISO, expandedISOMin, ownedND, wallStops, allowExpandedIso }));
   } else {
     out.ndPath = null;
   }

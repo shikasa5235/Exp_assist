@@ -692,6 +692,91 @@
       return { expected: '警告なし', actual: w ? w.message : '警告なし', pass: !w };
     });
 
+    // ===== 等価露出一覧（3項目・2段刻み）と拡張ISO トグル ===================
+    add(47, '等価露出一覧: 開放F2.8 → F2.8/F5.6/F11 の3行がすべて等価', () => {
+      const st = makeState({
+        ui: { tab: 'calc', theme: 'auto', firstRun: false, manual: null, manualTray: false },
+        scene: { evBase: 13, adjust: 0 }, camera: { isoMin: 200 }, lens: { fMin: F28, fMax: 22 },
+      });
+      const rows = compute(st).equiv;
+      const labels = rows.map((r) => r.fLabel).join('/');
+      // 3行とも同じ EV になっているか：EV = log2(F²/t) が一致すること
+      const evs = rows.map((r) => {
+        const fi = F.labels.indexOf(r.fLabel) + F.minIndex;
+        const si = SS.labels.indexOf(r.ssLabel) + SS.minIndex;
+        return Math.log2(F.real(fi) ** 2 / SS.real(si));
+      });
+      const same = evs.every((v) => near(v, evs[0], 0.2)); // 1/3段の丸め内
+      const ok = rows.length === 3 && labels === '2.8/5.6/11'
+        && rows.every((r) => !r.disabled) && same;
+      return {
+        expected: '3行 2.8/5.6/11 / 全行有効 / 同一EV',
+        actual: `${rows.length}行 ${labels} / EV ${evs.map((v) => v.toFixed(2)).join(',')}`,
+        pass: ok,
+      };
+    });
+    add(48, '等価露出一覧: 開放F4.0 → F2.8 の行が理由付きで使用不可（案B）', () => {
+      const st = makeState({
+        ui: { tab: 'calc', theme: 'auto', firstRun: false, manual: null, manualTray: false },
+        scene: { evBase: 13, adjust: 0 }, camera: { isoMin: 200 }, lens: { fMin: 4.0, fMax: 22 },
+      });
+      const rows = compute(st).equiv;
+      const ok = rows.length === 3 && rows[0].fLabel === '2.8' && rows[0].disabled === true
+        && /開放F4\.0のため使用不可/.test(rows[0].reason)
+        && rows[1].disabled === false && rows[2].disabled === false;
+      return {
+        expected: '3行 / 1行目が使用不可（理由付き）/ 残り2行は有効',
+        actual: `${rows.length}行 / ${rows.map((r) => `${r.fLabel}${r.disabled ? `(不可:${r.reason})` : ''}`).join(' ')}`,
+        pass: ok,
+      };
+    });
+    add(49, '拡張ISO OFF → ND が2段多く必要（ON との差が ISO200→50 の2段）', () => {
+      const off = compute(dayState({ camera: { syncSpeed: SYNC, isoMin: 200, expandedISOMin: 50, allowExpandedIso: false } }));
+      const on = compute(dayState({ camera: { syncSpeed: SYNC, isoMin: 200, expandedISOMin: 50, allowExpandedIso: true } }));
+      const ok = off.ambient.isoLabel === '200' && on.ambient.isoLabel === '50'
+        && near(off.paths.nd.lossStops - on.paths.nd.lossStops, 2, 1e-9);
+      return {
+        expected: 'OFF:ISO200 / ON:ISO50 / ND段数の差 2段',
+        actual: `OFF:ISO${off.ambient.isoLabel}(ND${off.paths.nd.lossStops}段) / ON:ISO${on.ambient.isoLabel}(ND${on.paths.nd.lossStops}段)`,
+        pass: ok,
+      };
+    });
+    add(50, '拡張ISO: OFF で ND2枚なら info が出て、ON では出ず枚数が減る', () => {
+      const off = compute(dayState({ camera: { syncSpeed: SYNC, isoMin: 200, expandedISOMin: 50, allowExpandedIso: false } }));
+      const on = compute(dayState({ camera: { syncSpeed: SYNC, isoMin: 200, expandedISOMin: 50, allowExpandedIso: true } }));
+      const offInfo = off.warnings.find((w) => /拡張ISO/.test(w.message));
+      const onInfo = on.warnings.find((w) => /拡張ISO/.test(w.message));
+      const offCount = off.paths.nd.nd.split('+').length;
+      const onCount = on.paths.nd.nd.split('+').length;
+      const ok = offCount === 2 && offInfo && offInfo.level === 'info'
+        && /ND 1枚で済みます/.test(offInfo.message) && !onInfo && onCount < offCount;
+      return {
+        expected: 'OFF:2枚＋info / ON:info なし・枚数減',
+        actual: `OFF:${off.paths.nd.nd}(${offInfo ? 'info' : 'なし'}) / ON:${on.paths.nd.nd}(${onInfo ? 'info' : 'なし'})`,
+        pass: ok,
+      };
+    });
+
+    add(51, '回折の境界: F11（実体11.314）は出さず F13 で出す', () => {
+      // 判定は段位置で行う。素朴な fReal > 11 に戻すと F11(11.314) で発火して赤になる
+      const at = (fi) => compute(makeState({
+        intent: 'blur', scene: { evBase: 13, adjust: 0 }, camera: { isoMin: 200 },
+        lens: { fMin: F.real(fi), fMax: 32 }, focal: 50, subject: 'static',
+      }));
+      const f11 = at(21), f13 = at(22);
+      const has = (d) => d.warnings.some((w) => w.icon === 'diffraction');
+      const ok = F.label(21) === '11' && F.label(22) === '13'
+        && F.real(21) > 11              // 実体は 11 より大きい（素朴な比較なら発火する）
+        && !has(f11) && has(f13)
+        // 一覧側も同じ基準：F11 の行に回折フラグが付かない
+        && f11.equiv.every((r) => !r.flags.includes('diffraction'));
+      return {
+        expected: 'F11(11.314)→なし / F13→あり / 一覧のF11行もなし',
+        actual: `F11:${has(f11) ? 'あり' : 'なし'} / F13:${has(f13) ? 'あり' : 'なし'} / 実体${F.real(21).toFixed(3)}`,
+        pass: ok,
+      };
+    });
+
     // ======================================================================
     //  #33 helpId の網羅性（manual.md §0.5 の対応表と実装の一致）
     // ======================================================================
