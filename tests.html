@@ -67,7 +67,7 @@
     } from './js/advisor.js';
     import { SUBJECTS, POWER_STEPS, HELP } from './js/scenes.js';
     import { compute } from './js/compute.js';
-    import { makeState, migrate } from './js/state.js';
+    import { makeState, migrate, mergeDeep } from './js/state.js';
 
     // ---- 判定ヘルパー -------------------------------------------------------
     const rel = (a, b, tol = 0.01) => Math.abs(a - b) <= Math.abs(b) * tol + 1e-9;
@@ -757,6 +757,43 @@
       };
     });
 
+    add(52, '拡張ISO を ON→OFF に戻すと ISO 下限が 200 に戻り ND が2段増える', () => {
+      // 49 は OFF/ON を個別に見るだけ。ここは「切り替えの前後で状態が残らない」ことを見る
+      const base = { syncSpeed: SYNC, isoMin: 200, expandedISOMin: 50 };
+      const on = dayState({ camera: { ...base, allowExpandedIso: true } });
+      const back = mergeDeep(on, { camera: { allowExpandedIso: false } }); // ON の state から戻す
+      const dOn = compute(on), dBack = compute(back);
+      // state 層：mergeDeep が false で上書きできること（true のまま残らない）
+      const stateOk = back.camera.allowExpandedIso === false;
+      const ok = stateOk && dOn.ambient.isoLabel === '50' && dBack.ambient.isoLabel === '200'
+        && near(dBack.paths.nd.lossStops - dOn.paths.nd.lossStops, 2, 1e-9)
+        // 計算タブのクランプ下限も戻ること（isoFloorOf 経由でないと戻らない）
+        && compute(mergeDeep(back, { ui: { tab: 'calc' } })).manual != null;
+      return {
+        expected: 'ON:ISO50 → OFF:ISO200 / ND段数 +2',
+        actual: `${dOn.ambient.isoLabel}→${dBack.ambient.isoLabel} / ND ${dOn.paths.nd.lossStops}→${dBack.paths.nd.lossStops}段 / state=${back.camera.allowExpandedIso}`,
+        pass: ok,
+      };
+    });
+    add(53, '校正値が compute まで通る（200Ws/3m/F11/ISO100/フル発光 → k=2.33）', () => {
+      // #13 は calibrate() 単体。ここは cal に保存した k が到達距離に反映されるまでを見る
+      const c = calibrate({ ws: 200, distance: 3, fAperture: 11, iso: 100, powerStops: 0 });
+      const kOk = rel(c.gnMeasured, 33) && rel(c.k, 2.333, 0.005);
+      const d = compute(powerState({
+        profiles: makeState().profiles.map((p) => (p.id === 'p2'
+          ? { ...p, cal: { reflector: c.k }, powerCeilingStops: 3, minPowerStops: 7 } : p)),
+        flash: { profileId: 'p2', modifier: 'reflector', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'auto' },
+      }));
+      // フル発光到達 = k√Ws × √(ISO/100) ÷ F。ISO200 なので √2 倍
+      const expect = (c.k * Math.sqrt(200) * Math.SQRT2) / F28;
+      const ok = kOk && rel(d.flash.reachFull, expect, 0.01) && rel(expect, 16.5, 0.02)
+        && d.uncalibrated === false;
+      return {
+        expected: `k=2.33 / フル発光到達 ${expect.toFixed(1)}m / 校正済み`,
+        actual: `k=${c.k.toFixed(3)} / ${d.flash.reachFull.toFixed(1)}m / uncalibrated=${d.uncalibrated}`,
+        pass: ok,
+      };
+    });
     add(51, '回折の境界: F11（実体11.314）は出さず F13 で出す', () => {
       // 判定は段位置で行う。素朴な fReal > 11 に戻すと F11(11.314) で発火して赤になる
       const at = (fi) => compute(makeState({

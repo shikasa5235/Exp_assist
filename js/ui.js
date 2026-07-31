@@ -251,6 +251,11 @@ function wireEvents() {
 /** シートを開く前のフォーカス元。閉じたときここへ戻す。 */
 let manualReturnFocus = null;
 
+/* スワイプの判定閾値（実機で調整する）。横と縦を取り違えないよう軸比で判別する。 */
+const SWIPE_AXIS_RATIO = 1.5; // |dx| がこの倍率を超えて |dy| より大きければ横
+const SWIPE_MIN_PX = 40;      // 横スワイプと認める最小移動量
+const SWIPE_CLOSE_PX = 80;    // 下スワイプでシートを閉じる最小移動量
+
 function wireManual() {
   // アンカー指定で開くときはトレイを閉じた状態にする（§0.4）
   el.manualOpen.addEventListener('click', () => setState({ ui: { manual: 'help-intro', manualTray: false } }));
@@ -279,16 +284,29 @@ function wireManual() {
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   });
-  // 背景のスワイプダウンで閉じる（§0.3）
-  let touchStartY = null;
+  // スワイプ：横＝トレイ開閉、下＝シートを閉じる（§0.3・§0.4）
+  //
+  // 開始位置を画面左端に限定しない。左端から始まるスワイプは Safari の戻るジェスチャと
+  // 競合するため、シート内のどこからでも効くようにする（シート内に横スワイプで動く部品はない）。
+  let touch = null;
   el.manual.addEventListener('touchstart', (e) => {
-    touchStartY = el.manualBody.scrollTop <= 0 ? e.touches[0].clientY : null;
+    const t = e.touches[0];
+    touch = { x: t.clientX, y: t.clientY, atTop: el.manualBody.scrollTop <= 0 };
   }, { passive: true });
   el.manual.addEventListener('touchend', (e) => {
-    if (touchStartY == null) return;
-    const dy = e.changedTouches[0].clientY - touchStartY;
-    touchStartY = null;
-    if (dy > 80) setState({ ui: { manual: null } });
+    if (!touch) return;
+    const t = e.changedTouches[0];
+    const dx = t.clientX - touch.x;
+    const dy = t.clientY - touch.y;
+    const atTop = touch.atTop;
+    touch = null;
+    // 軸の判別：横成分が縦の1.5倍を超え、かつ十分な距離があれば横スワイプ
+    if (Math.abs(dx) > Math.abs(dy) * SWIPE_AXIS_RATIO && Math.abs(dx) > SWIPE_MIN_PX) {
+      setState({ ui: { manualTray: dx > 0 } }); // 右で開く／左で閉じる
+      return;
+    }
+    // それ以外は既存の縦スワイプ判定（本文が最上部にあるときだけ閉じる）
+    if (atTop && dy > SWIPE_CLOSE_PX) setState({ ui: { manual: null, manualTray: false } });
   });
 }
 
@@ -859,8 +877,8 @@ function toggleCalibration(card, i) {
   form.innerHTML = `
     <div class="set-row"><label>距離(m)</label><input class="input" data-c="distance" type="text" inputmode="decimal" value="3"></div>
     <div class="set-row"><label>適正だったF値</label><input class="input" data-c="f" type="text" inputmode="decimal" value="11"></div>
-    <div class="set-row"><label>そのときのISO</label><input class="input" data-c="iso" type="text" inputmode="decimal" value="${state.camera.isoMin}"></div>
-    <div class="set-row"><label>発光量(1/x)</label><input class="input" data-c="power" type="text" inputmode="decimal" value="1"></div>`;
+    <div class="set-row"><label>そのときのISO</label><input class="input" data-c="iso" type="text" inputmode="decimal" value="100"></div>
+    <div class="set-row"><label>そのときの発光量<br><span class="caption">1/1 でも 1 でも可</span></label><input class="input" data-c="power" type="text" inputmode="decimal" value="1/1"></div>`;
   const run = document.createElement('button');
   run.type = 'button'; run.className = 'btn btn-primary btn-block'; run.textContent = 'この結果で校正する';
   run.addEventListener('click', () => runCalibration(form, i));
@@ -868,19 +886,61 @@ function toggleCalibration(card, i) {
   card.appendChild(form);
 }
 
-/** 校正の実行：純関数 calibrate で k を逆算し setState。 */
+/**
+ * 校正の実行：純関数 calibrate で k を逆算して保存する。
+ * 発光量は「1/x」表記でも「x」表記でも受ける（`1/128` と `128` の両方を 7段と解釈する）。
+ * 分数を数字だけに削ると `1/128` が 1128 になり、段数が壊れるため専用に解析する。
+ */
 function runCalibration(form, i) {
-  const get = (c) => parseFloat(String(form.querySelector(`[data-c="${c}"]`).value).replace(/[^\d.]/g, ''));
-  const distance = clamp(get('distance') || 3, 0.3, 50);
-  const fAperture = clamp(get('f') || 11, 1, 32);
-  const iso = clamp(get('iso') || state.camera.isoMin, 25, 102400);
-  const powerX = get('power') || 1;
-  const powerStops = clamp(Math.round(Math.log2(powerX)), 0, 10);
-  const { k } = calibrate({ ws: state.profiles[i].ws, distance, fAperture, iso, powerStops });
-  // 実測 k はモディファイアごとに保存する（切り替えても正確なまま／未校正の組み合わせはバッジが出る）
   const mod = state.flash.modifier;
-  updateProfile(i, { cal: { ...(state.profiles[i].cal || {}), [mod]: clamp(k, 2.0, 6.0) } });
-  toast(`校正しました：k = ${k.toFixed(2)}`);
+  try {
+    const field = (c) => {
+      const input = form.querySelector(`[data-c="${c}"]`);
+      if (!input) throw new Error(`入力欄 ${c} がありません`);
+      return String(input.value).trim();
+    };
+    const num = (c) => parseFloat(field(c).replace(/[^\d.]/g, ''));
+    // 空欄・非数値は既定値で補わず失敗させる。黙って別の値で校正してしまうほうが危険
+    const distance = num('distance'), fAperture = num('f'), iso = num('iso');
+    const powerStops = parsePowerStops(field('power'));
+    if (![distance, fAperture, iso, powerStops].every(Number.isFinite)) {
+      throw new Error('数値として読めない入力があります');
+    }
+    const { k } = calibrate({
+      ws: state.profiles[i].ws,
+      distance: clamp(distance, 0.3, 50),
+      fAperture: clamp(fAperture, 1, 32),
+      iso: clamp(iso, 25, 102400),
+      powerStops: clamp(powerStops, 0, 10),
+    });
+    if (!Number.isFinite(k)) throw new Error('k を計算できません');
+    const kClamped = clamp(k, 2.0, 6.0);
+
+    // 実測 k はモディファイアごとに保存する（切り替えても正確なまま／未校正の組み合わせはバッジが出る）
+    updateProfile(i, { cal: { ...(state.profiles[i].cal || {}), [mod]: kClamped } });
+
+    // 書き込めたことを state から読み返して確認する。書けていないのに成功と表示しない
+    const saved = state.profiles[i].cal ? state.profiles[i].cal[mod] : undefined;
+    if (saved == null) throw new Error('保存できませんでした');
+
+    toast(Math.abs(kClamped - k) > 1e-9
+      ? `k = ${kClamped.toFixed(2)} で校正しました（実測 ${k.toFixed(2)} を 2.0〜6.0 に丸めました。入力を確認してください）`
+      : `k = ${k.toFixed(2)} で校正しました`);
+  } catch (e) {
+    // 黙って何もしない状態を作らない。バッジの消失だけが手がかりだと原因を追えない
+    toast(`校正できませんでした。入力を確認してください（${e.message}）`);
+  }
+}
+
+/**
+ * 発光量の入力を段数に変換する。`1/1`→0、`1/128`→7、`128`→7、`4`→2。
+ * @param {string} text @returns {number} 段（フル発光からの絞り段数）
+ */
+function parsePowerStops(text) {
+  const m = text.match(/^\s*1\s*\/\s*(\d+(?:\.\d+)?)\s*$/); // 「1/x」表記
+  const denom = m ? parseFloat(m[1]) : parseFloat(text.replace(/[^\d.]/g, ''));
+  if (!Number.isFinite(denom) || denom <= 0) return 0;
+  return Math.round(Math.log2(denom));
 }
 
 function ownedNdRow() {

@@ -466,7 +466,8 @@ function manualResult(ev, st) {
     // stops: 段数への換算（F は面積比なので 2*log2、SS/ISO は log2）
     f: { axis: 'F', lo: lens.fMin, hi: lens.fMax, loKind: 'short', hiKind: 'bright', stops: (a, b) => 2 * Math.log2(a / b) },
     ss: { axis: 'SS', lo: camera.maxSS, hi: SLOWEST, loKind: 'bright', hiKind: 'short', stops: (a, b) => Math.log2(a / b) },
-    iso: { axis: 'ISO', lo: camera.expandedISOMin, hi: camera.isoMax, loKind: 'bright', hiKind: 'short', stops: (a, b) => Math.log2(a / b) },
+    // 下限は「使える最も低い ISO」。expandedISOMin を直接読むと拡張ISO トグルが効かない
+    iso: { axis: 'ISO', lo: isoFloorOf(st), hi: camera.isoMax, loKind: 'bright', hiKind: 'short', stops: (a, b) => Math.log2(a / b) },
   };
   const spec = LIMITS[computedKey];
   const value = { f: fReal, ss: ssReal, iso: isoReal }[computedKey];

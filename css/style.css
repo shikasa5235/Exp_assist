@@ -470,7 +470,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 body.sheet-open { overflow: hidden; }
 
 /* ===== レスポンシブ（UI仕様 §14）================================ */
-@media (min-width: 768px) {
+/* 2カラムは「幅が広く、かつ縦にも余裕がある」画面だけ。高さ条件が無いと
+   横持ちスマホ（例 956×440）で 2カラムと結果パネルの圧縮が同時に効き、右カラムが潰れる。 */
+@media (min-width: 768px) and (min-height: 600px) {
   body { flex-direction: row; }
   .app-header { position: fixed; top: 0; left: 0; right: 0; }
   .scroll-body { flex: 1 1 60%; padding-top: calc(var(--header-h) + var(--sat) + 16px); }
