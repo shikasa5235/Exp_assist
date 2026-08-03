@@ -53,8 +53,28 @@ export const defaultState = {
   ],
   settings: { hssBaseLoss: 2.0, ambientOffsetDefault: -1, ownedND: [1, 2, 3, 4], comp: 0, blackMistStops: 0 },
   // manual: null なら閉。'help-xxxx' ならそのセクションを開く（再描画経路を増やさないため state に置く）
-  ui: { tab: 'easy', theme: 'auto', firstRun: true, manual: null, manualTray: false },
+  // panelSize: 結果パネルの高さ。屋外・片手で入力と結果のどちらに画面を配分するかをユーザーが決める。
+  // 'expanded'(画面高の約60%) | 'normal'(現状) | 'minimal'(約56px・数値1行)。storage に永続化する。
+  ui: { tab: 'easy', theme: 'auto', firstRun: true, manual: null, manualTray: false, panelSize: 'normal' },
 };
+
+/** 結果パネルの高さ。小さい順（上スワイプで expanded 方向、下スワイプで minimal 方向）。 */
+export const PANEL_SIZES = ['minimal', 'normal', 'expanded'];
+
+/** 画面高がこれ未満なら expanded を選べない（画面高の60%が入力領域を潰すため）。 */
+export const PANEL_EXPANDED_MIN_H = 600;
+
+/**
+ * 選べない段階をクランプする。描画・保存・テストで同じ規則を使うため純粋関数にする。
+ * @param {string} size 'minimal' | 'normal' | 'expanded'
+ * @param {number} viewportHeight 画面の高さ(px)
+ * @returns {string} 実際に使う段階
+ */
+export function clampPanelSize(size, viewportHeight) {
+  const ok = PANEL_SIZES.includes(size) ? size : 'normal';
+  if (ok === 'expanded' && viewportHeight < PANEL_EXPANDED_MIN_H) return 'normal';
+  return ok;
+}
 
 /** 深いコピー。 @template T @param {T} o @returns {T} */
 export function clone(o) { return JSON.parse(JSON.stringify(o)); }

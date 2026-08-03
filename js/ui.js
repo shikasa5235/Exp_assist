@@ -14,7 +14,7 @@ import { SCENES, SUBJECTS, MODIFIERS, POWER_STEPS } from './scenes.js';
 import { F, SS, ISO } from './stops.js';
 import { calibrate } from './flash.js';
 import { makeWheel } from './wheel.js';
-import { defaultState, clone, mergeDeep, migrate } from './state.js';
+import { defaultState, clone, mergeDeep, migrate, clampPanelSize, PANEL_SIZES } from './state.js';
 import * as storage from './storage.js';
 
 /* ---- 選択肢（UI仕様 §3）---------------------------------------------- */
@@ -71,7 +71,7 @@ function cacheElements() {
     'curtain-field', 'curtain-toggle', 'result-panel', 'wall-readout', 'wall-num',
     'result-badges', 'ev-ruler', 'result-systems', 'path-compare', 'warnings', 'toast',
     'calc-ev', 'calc-ev-err', 'calc-nd-chips', 'calc-tracks', 'equiv-list', 'settings-root',
-    'power-chips', 'power-hint',
+    'power-chips', 'power-hint', 'panel-handle', 'result-summary',
     'manual', 'manual-open', 'manual-close', 'manual-index', 'manual-body', 'manual-tray-toggle',
   ];
   ids.forEach((id) => { el[id.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = document.getElementById(id); });
@@ -238,12 +238,60 @@ function wireEvents() {
   el.focalOther.querySelector('input').addEventListener('blur', (e) => commitOther('focal', e.target));
   el.distanceOther.querySelector('input').addEventListener('blur', (e) => commitOther('distance', e.target));
 
+  wirePanelHandle();
+
   // 拡張ISO トグル（かんたん・計算の両方。同じ state を見るので双方向に連動する）
   document.querySelectorAll('.exp-iso-toggle').forEach((btn) => {
     btn.addEventListener('click', () => setState({ camera: { allowExpandedIso: !state.camera.allowExpandedIso } }));
   });
 
   wireManual();
+}
+
+/* ---- 結果パネルの高さ（3段階）--------------------------------------- */
+
+/** 段階を1つ動かすのに必要なスワイプ量。連続追従はせず、超えた時点で隣へ吸着する。 */
+const PANEL_SWIPE_PX = 40;
+
+/** 画面の高さを与えてクランプ（規則そのものは state.js の純粋関数）。 */
+function panelSizeNow(size = state.ui.panelSize) {
+  return clampPanelSize(size, window.innerHeight);
+}
+
+/** ハンドルの操作を配線する。パネル内部では反応させない（一覧のスクロールと衝突するため）。 */
+function wirePanelHandle() {
+  const step = (dir) => {
+    const cur = PANEL_SIZES.indexOf(panelSizeNow());
+    const next = PANEL_SIZES[clamp(cur + dir, 0, PANEL_SIZES.length - 1)];
+    setState({ ui: { panelSize: panelSizeNow(next) } });
+  };
+  let startY = null, moved = false;
+  el.panelHandle.addEventListener('touchstart', (e) => {
+    startY = e.touches[0].clientY; moved = false;
+  }, { passive: true });
+  el.panelHandle.addEventListener('touchmove', (e) => {
+    if (startY == null || moved) return;
+    const dy = e.touches[0].clientY - startY;
+    if (Math.abs(dy) < PANEL_SWIPE_PX) return;
+    moved = true;              // 1回のスワイプで1段階だけ動かす
+    step(dy < 0 ? 1 : -1);     // 上（dy<0）で大きく、下で小さく
+  }, { passive: true });
+  el.panelHandle.addEventListener('touchend', () => { startY = null; }, { passive: true });
+  // タップは標準へ戻す。スワイプで動かした直後は反応させない
+  el.panelHandle.addEventListener('click', () => {
+    if (moved) { moved = false; return; }
+    setState({ ui: { panelSize: 'normal' } });
+  });
+  // キーボード操作（上下キーで段階を動かす）
+  el.panelHandle.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowUp') { e.preventDefault(); step(1); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); step(-1); }
+  });
+  // 画面の回転などで expanded が選べなくなったら normal へ落とす
+  window.addEventListener('resize', () => {
+    const fixed = panelSizeNow();
+    if (fixed !== state.ui.panelSize) setState({ ui: { panelSize: fixed } });
+  });
 }
 
 /* ---- マニュアル（全画面シート。manual.md §0.3）----------------------- */
@@ -527,6 +575,14 @@ function setChecked(container, selectedKey) {
 
 function renderResult() {
   const d = derived;
+  // 高さの段階（選べない段階は画面高でクランプする）
+  const size = panelSizeNow();
+  el.resultPanel.classList.remove('size-minimal', 'size-normal', 'size-expanded');
+  el.resultPanel.classList.add(`size-${size}`);
+  // 最小表示の1行（核心の数値。警告はアイコンだけ残す）
+  const s = d.summary;
+  el.resultSummary.innerHTML = `<span class="sum-values">${s.text}</span>`
+    + (s.icon ? `<svg class="icon ${s.level}" aria-hidden="true"><use href="#i-${s.icon}"></use></svg>` : '');
   // derived を描くだけ。タブは見ない（何を映すかは compute() の入口で解決済み）。
   // 同調速度の壁
   if (d.wall) { el.wallReadout.hidden = false; el.wallNum.textContent = d.wall.text; }
@@ -820,23 +876,33 @@ function onSettingChange(e) {
   setState(patchByPath(path, value));
 }
 
+/**
+ * 発光量のドロップダウン（1/1 〜 1/128）。値は段数（1/1=0 … 1/128=7）。
+ * 「1/x の x」をテキストで入れさせると単位が伝わらず、段数の向き（小さいほど強い）も誤解される。
+ * @param {string} field data-pfield 名
+ * @param {number} stops 現在値（段）
+ * @returns {string} HTML
+ */
+function powerSelectHtml(field, stops, attr = 'data-pfield') {
+  const opts = POWER_STEPS.map((s) =>
+    `<option value="${s.stops}"${s.stops === stops ? ' selected' : ''}>${s.label}</option>`).join('');
+  return `<select class="select" ${attr}="${field}">${opts}</select>`;
+}
+
 function profileCard(p, i) {
   const card = document.createElement('div'); card.className = 'profile-card'; card.dataset.pidx = String(i);
   card.innerHTML = `
     <div class="set-row"><label>名称</label><input class="input" data-pfield="name" type="text" value="${p.name}"></div>
     <div class="set-row"><label>出力(Ws)</label><input class="input" data-pfield="ws" type="text" inputmode="decimal" value="${p.ws}"></div>
     <div class="set-row"><label>機材係数 k</label><input class="input" data-pfield="k" type="text" inputmode="decimal" value="${p.k}"></div>
-    <div class="set-row"><label>最小発光量 (1/x)<br><span class="caption">弱い側の限界</span></label><input class="input" data-pfield="minPower" type="text" inputmode="decimal" value="${2 ** p.minPowerStops}"></div>
-    <div class="set-row"><label>発光量の上限 (1/x)<br><span class="caption">強い側の限界。おまかせでもこれより強くしない</span></label><input class="input" data-pfield="powerCeiling" type="text" inputmode="decimal" value="${2 ** (p.powerCeilingStops ?? 0)}"></div>
+    <div class="set-row"><label>いちばん弱い発光量<br><span class="caption">このストロボが出せる下限</span></label>
+      ${powerSelectHtml('minPower', p.minPowerStops)}</div>
+    <div class="set-row"><label>おまかせの上限<br><span class="caption">これより強い発光量を自動で選びません</span></label>
+      ${powerSelectHtml('powerCeiling', p.powerCeilingStops ?? 0)}</div>
     <div class="toggle-field"><span class="field-label">HSS 対応</span>
       <button type="button" class="toggle" data-pfield="hss" role="switch" aria-checked="${p.hss}" aria-label="HSS対応"><span class="toggle-knob"></span></button></div>`;
-  const cal = document.createElement('button');
-  // 校正はプロファイル×モディファイアごと。いま選んでいるモディファイアが対象になる。
-  const calibratedNow = p.cal && p.cal[state.flash.modifier] != null;
-  cal.type = 'button'; cal.className = 'btn btn-ghost btn-block';
-  cal.textContent = calibratedNow ? 'このモディファイアで再校正' : 'テスト撮影で校正';
-  cal.addEventListener('click', () => toggleCalibration(card, i));
-  card.appendChild(cal);
+  // 校正フォームは常時展開する。押すまで出ないボタンでは発見されない（アプリの精度を決める中核機能）。
+  card.appendChild(calibrationForm(i));
   // プロファイル各項目の変更配線
   card.addEventListener('change', (e) => onProfileChange(e, i));
   card.querySelector('[data-pfield="hss"]').addEventListener('click', (e) => {
@@ -854,11 +920,13 @@ function onProfileChange(e, i) {
   if (Number.isNaN(raw)) { renderSettings(); return; }
   if (f === 'ws') updateProfile(i, { ws: clamp(Math.round(raw), 10, 2000) });
   else if (f === 'k') updateProfile(i, { k: clamp(raw, 2.0, 6.0) });
-  else if (f === 'minPower') updateProfile(i, { minPowerStops: clamp(Math.round(Math.log2(raw)), 0, 10) });
-  // 上限は「強い側」なので段数は小さい。1/1=0 〜 最小発光量の段数まで
-  else if (f === 'powerCeiling') {
-    const prof = state.profiles[i];
-    updateProfile(i, { powerCeilingStops: clamp(Math.round(Math.log2(raw)), 0, prof.minPowerStops) });
+  // 発光量はドロップダウン（値は段数そのもの）。上限が下限より弱い組み合わせは成立しないので揃える
+  else if (f === 'minPower') {
+    const minPowerStops = clamp(Math.round(raw), 0, 7);
+    const ceiling = Math.min(state.profiles[i].powerCeilingStops ?? 0, minPowerStops);
+    updateProfile(i, { minPowerStops, powerCeilingStops: ceiling });
+  } else if (f === 'powerCeiling') {
+    updateProfile(i, { powerCeilingStops: clamp(Math.round(raw), 0, state.profiles[i].minPowerStops) });
   }
 }
 
@@ -868,22 +936,29 @@ function updateProfile(i, patch) {
   setState({ profiles });
 }
 
-/** 校正フォームの開閉。 */
-function toggleCalibration(card, i) {
-  const existing = card.querySelector('.calib-form');
-  if (existing) { existing.remove(); return; }
-  const p = state.profiles[i];
-  const form = document.createElement('div'); form.className = 'calib-form'; form.style.marginTop = '8px';
+/**
+ * テスト撮影で校正するフォーム（マニュアル §12 の手順）。常時表示。
+ * **発光量は 1/1 から 1/128 まで全部選べる。** 校正は「テスト撮影で実際に使った発光量」を
+ * 入れるものなので、撮影用チップの制限（閃光時間の理由で 1/1・1/2 を出さない）を適用しない。
+ * @param {number} i プロファイルの添字
+ * @returns {HTMLElement}
+ */
+function calibrationForm(i) {
+  const form = document.createElement('div');
+  form.className = 'calib-form';
   form.innerHTML = `
-    <div class="set-row"><label>距離(m)</label><input class="input" data-c="distance" type="text" inputmode="decimal" value="3"></div>
+    <div class="calib-title">テスト撮影で校正</div>
+    <p class="caption">標準リフレクター（または使うモディファイア）で1枚撮り、適正だった値を入れます。
+    いま選択中のモディファイアの校正値として保存されます。</p>
+    <div class="set-row"><label>ストロボ→被写体の距離(m)</label><input class="input" data-c="distance" type="text" inputmode="decimal" value="3"></div>
     <div class="set-row"><label>適正だったF値</label><input class="input" data-c="f" type="text" inputmode="decimal" value="11"></div>
     <div class="set-row"><label>そのときのISO</label><input class="input" data-c="iso" type="text" inputmode="decimal" value="100"></div>
-    <div class="set-row"><label>そのときの発光量<br><span class="caption">1/1 でも 1 でも可</span></label><input class="input" data-c="power" type="text" inputmode="decimal" value="1/1"></div>`;
+    <div class="set-row"><label>そのときの発光量</label>${powerSelectHtml('power', 0, 'data-c')}</div>`;
   const run = document.createElement('button');
   run.type = 'button'; run.className = 'btn btn-primary btn-block'; run.textContent = 'この結果で校正する';
   run.addEventListener('click', () => runCalibration(form, i));
   form.appendChild(run);
-  card.appendChild(form);
+  return form;
 }
 
 /**
@@ -902,6 +977,7 @@ function runCalibration(form, i) {
     const num = (c) => parseFloat(field(c).replace(/[^\d.]/g, ''));
     // 空欄・非数値は既定値で補わず失敗させる。黙って別の値で校正してしまうほうが危険
     const distance = num('distance'), fAperture = num('f'), iso = num('iso');
+    // 発光量はドロップダウン（値は段数）。1/1=0 … 1/128=7
     const powerStops = parsePowerStops(field('power'));
     if (![distance, fAperture, iso, powerStops].every(Number.isFinite)) {
       throw new Error('数値として読めない入力があります');
@@ -933,13 +1009,17 @@ function runCalibration(form, i) {
 }
 
 /**
- * 発光量の入力を段数に変換する。`1/1`→0、`1/128`→7、`128`→7、`4`→2。
+ * 発光量の入力を段数に変換する。
+ * ドロップダウンの値（`0`〜`7`）はそのまま段数。手入力の `1/128` や `128` も受ける
+ * （数字だけに削ると `1/128` が 1128 になり段数が壊れるため、分数を専用に解析する）。
  * @param {string} text @returns {number} 段（フル発光からの絞り段数）
  */
 function parsePowerStops(text) {
-  const m = text.match(/^\s*1\s*\/\s*(\d+(?:\.\d+)?)\s*$/); // 「1/x」表記
-  const denom = m ? parseFloat(m[1]) : parseFloat(text.replace(/[^\d.]/g, ''));
-  if (!Number.isFinite(denom) || denom <= 0) return 0;
+  const s = String(text).trim();
+  if (/^[0-7]$/.test(s)) return Number(s);                  // ドロップダウンの値＝段数
+  const m = s.match(/^\s*1\s*\/\s*(\d+(?:\.\d+)?)\s*$/);     // 「1/x」表記
+  const denom = m ? parseFloat(m[1]) : parseFloat(s.replace(/[^\d.]/g, ''));
+  if (!Number.isFinite(denom) || denom <= 0) return NaN;
   return Math.round(Math.log2(denom));
 }
 
@@ -994,8 +1074,8 @@ function renderSettings() {
   el.settingsRoot.querySelectorAll('.profile-card').forEach((card) => {
     const i = Number(card.dataset.pidx); const p = state.profiles[i]; if (!p) return;
     setInputVal(card, 'name', p.name); setInputVal(card, 'ws', p.ws); setInputVal(card, 'k', p.k);
-    setInputVal(card, 'minPower', 2 ** p.minPowerStops);
-    setInputVal(card, 'powerCeiling', 2 ** (p.powerCeilingStops ?? 0));
+    setInputVal(card, 'minPower', p.minPowerStops);
+    setInputVal(card, 'powerCeiling', p.powerCeilingStops ?? 0);
     card.querySelector('[data-pfield="hss"]').setAttribute('aria-checked', String(p.hss));
   });
   const owned = el.settingsRoot.querySelector('#owned-nd-chips');

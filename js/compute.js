@@ -536,7 +536,30 @@ export function compute(st) {
 
   d.equiv = equivalentList(evScene, st, d.mainFIndex);
   if (d.warnings.length === 0) d.warnings.push({ level: 'info', icon: 'info', helpId: HELP.ok, message: 'この設定で撮れます' });
+  d.summary = summaryOf(d);
   return d;
+}
+
+/**
+ * 結果パネルを最小表示にしたときに残す1行。**核心の数値は必ず見えている**
+ * （UI仕様の設計原則2「結果は常に見えている」を満たすため、完全に隠す状態は作らない）。
+ * 警告があることはレベルとアイコンだけ伝える（文言は畳む）。
+ * @param {object} d derived
+ * @returns {{parts:string[],text:string,level:string|null,icon:string|null}}
+ */
+function summaryOf(d) {
+  const a = d.ambient;
+  const parts = a ? [`F${a.fLabel}`, a.ssLabel, `ISO${a.isoLabel}`] : [];
+  if (d.flash) parts.push(`発光 ${d.flash.powerLabel}`);
+  // いちばん強いレベルの警告を1つだけ拾う（alert > warn > info）
+  const rank = { alert: 3, warn: 2, info: 1 };
+  const top = (d.warnings || []).reduce((best, w) => (!best || rank[w.level] > rank[best.level] ? w : best), null);
+  return {
+    parts,
+    text: parts.join(' ・ '),
+    level: top ? top.level : null,
+    icon: top ? top.icon : null,
+  };
 }
 
 /**

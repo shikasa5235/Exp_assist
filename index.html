@@ -221,6 +221,13 @@
 
   <!-- ===== 結果パネル（固定・常時表示）===== -->
   <section class="result-panel" id="result-panel" aria-label="計算結果">
+    <!-- 高さの3段階を切り替えるハンドル。掴む場所を見せるための横棒（当たり判定は44px以上） -->
+    <button type="button" class="panel-handle" id="panel-handle"
+            aria-label="結果パネルの高さを変える（上下スワイプで3段階、タップで標準）">
+      <span class="panel-grip" aria-hidden="true"></span>
+    </button>
+    <!-- 最小表示のときだけ出る1行（CSS で出し分け） -->
+    <div class="result-summary" id="result-summary" aria-live="polite"></div>
     <div class="result-head">
       <div class="wall-readout" id="wall-readout" hidden>
         <span class="wall-label">同調速度の壁</span><span class="wall-num" id="wall-num">–</span>
@@ -299,6 +306,18 @@
           <tr><th>計算</th><td>F値・SS・ISO のうち2つを自分で決めて、残り1つを出す。等価露出の一覧も見られます</td></tr>
           <tr><th>設定</th><td>手持ちの機材を登録する。ストロボの校正もここ</td></tr>
         </tbody></table>
+        <h4>結果パネルの高さを変える</h4>
+        <p>画面下の結果パネルは、上端の<strong>横棒（ハンドル）</strong>を上下にスワイプすると3段階に変わります。
+        タップすると標準に戻ります。</p>
+        <table><tbody>
+          <tr><th>大</th><td>EVルーラーとトラックを見ながら追い込む</td></tr>
+          <tr><th>標準</th><td>通常</td></tr>
+          <tr><th>小</th><td>数値1行だけ。シーンや距離をたくさん触りたいとき</td></tr>
+        </tbody></table>
+        <p><strong>小さくしても F値・SS・ISO（ストロボONなら発光量も）は必ず見えています。</strong>
+        警告が出ているときは行末にアイコンが残るので、気づかずに撮ることはありません。</p>
+        <p>選んだ高さは記憶され、次に開いたときも同じです。
+        横持ちで画面が低いときは「大」は選べません（入力欄が潰れるため）。</p>
         <h4>数値の性格について</h4>
         <p>このアプリが出す数字には<strong>2種類</strong>あります。</p>
         <p><strong>厳密なもの</strong> — 露出計算そのもの（F値・SS・ISO の関係、段数の差）。これは数式で決まるので誤差はありません。</p>

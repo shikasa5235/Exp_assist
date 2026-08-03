@@ -67,7 +67,7 @@
     } from './js/advisor.js';
     import { SUBJECTS, POWER_STEPS, HELP } from './js/scenes.js';
     import { compute } from './js/compute.js';
-    import { makeState, migrate, mergeDeep } from './js/state.js';
+    import { makeState, migrate, mergeDeep, clampPanelSize } from './js/state.js';
 
     // ---- 判定ヘルパー -------------------------------------------------------
     const rel = (a, b, tol = 0.01) => Math.abs(a - b) <= Math.abs(b) * tol + 1e-9;
@@ -757,6 +757,48 @@
       };
     });
 
+    add(54, '最小表示に残す1行：F/SS/ISO（ストロボONなら発光量も）', () => {
+      // レイアウト（EVルーラー・トラックの隠し方）は検証対象外。derived に核心の数値が
+      // 揃っていること＝原則2「結果は常に見えている」を満たせることだけを見る
+      const off = compute(makeState({
+        ui: { tab: 'easy', theme: 'auto', firstRun: false, manual: null, manualTray: false, panelSize: 'minimal' },
+        intent: 'blur', scene: { evBase: 13, adjust: 0 }, camera: { isoMin: 200 }, lens: { fMin: F28, fMax: 22 },
+      }));
+      const on = compute(powerState({
+        ui: { tab: 'easy', theme: 'auto', firstRun: false, manual: null, manualTray: false, panelSize: 'minimal' },
+      }));
+      const offOk = off.summary.parts.length === 3
+        && /^F/.test(off.summary.parts[0]) && /^ISO/.test(off.summary.parts[2])
+        && !/発光/.test(off.summary.text);
+      const onOk = on.summary.parts.length === 4 && /発光 1\/\d+/.test(on.summary.parts[3]);
+      // 警告は文言を畳み、レベルとアイコンだけ残す（何かあることが分かるように）
+      const alertCase = compute(makeState({
+        ui: { tab: 'easy', theme: 'auto', firstRun: false, manual: null, manualTray: false, panelSize: 'minimal' },
+        intent: 'nightHandheld', scene: { evBase: -6, adjust: 0 }, focal: 200,
+      }));
+      const iconOk = alertCase.summary.level === 'alert' && !!alertCase.summary.icon
+        && alertCase.summary.parts.length >= 3;
+      return {
+        expected: 'OFF:3項目 / ON:4項目（＋発光）/ 警告時はレベルとアイコンが残る',
+        actual: `OFF「${off.summary.text}」/ ON「${on.summary.text}」/ 警告 ${alertCase.summary.level}:${alertCase.summary.icon}`,
+        pass: offOk && onOk && iconOk,
+      };
+    });
+    add(55, '高さ600px未満では expanded が normal にクランプされる', () => {
+      const short = clampPanelSize('expanded', 440);   // 16 Pro Max 横持ち
+      const tall = clampPanelSize('expanded', 956);    // 縦持ち
+      const boundary = clampPanelSize('expanded', 600); // 境界は選べる
+      const keepsOthers = clampPanelSize('minimal', 440) === 'minimal'
+        && clampPanelSize('normal', 440) === 'normal';
+      const unknown = clampPanelSize('bogus', 956) === 'normal'; // 未知の値は標準へ
+      const ok = short === 'normal' && tall === 'expanded' && boundary === 'expanded'
+        && keepsOthers && unknown;
+      return {
+        expected: '440→normal / 600→expanded / 956→expanded / 他の段階は不変',
+        actual: `440→${short} / 600→${boundary} / 956→${tall} / 他:${keepsOthers} / 未知:${unknown}`,
+        pass: ok,
+      };
+    });
     add(52, '拡張ISO を ON→OFF に戻すと ISO 下限が 200 に戻り ND が2段増える', () => {
       // 49 は OFF/ON を個別に見るだけ。ここは「切り替えの前後で状態が残らない」ことを見る
       const base = { syncSpeed: SYNC, isoMin: 200, expandedISOMin: 50 };

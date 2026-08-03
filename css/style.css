@@ -279,10 +279,40 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .result-panel {
   position: sticky; bottom: 0; z-index: 15; flex: none;
   background: var(--panel); border-top: 1px solid var(--rule);
-  padding: 10px 16px calc(10px + var(--sab));
+  padding: 0 16px calc(10px + var(--sab));
   transition: max-height var(--dur-panel) var(--ease);
   max-height: 46vh; overflow-y: auto;
 }
+/* 高さ3段階。max-height だけを変え、中身の出し分けは hidden で行う */
+.result-panel.size-expanded { max-height: 60vh; }
+.result-panel.size-normal   { max-height: 46vh; }
+.result-panel.size-minimal  { max-height: 56px; overflow: hidden; }
+
+/* ハンドル：視覚的な横棒は 32×4px、当たり判定は 44px 以上 */
+.panel-handle {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: var(--tap-min); margin: 0 0 -6px;
+  touch-action: none; /* 上下スワイプをブラウザのスクロールに取られない */
+}
+.panel-grip {
+  display: block; width: 32px; height: 4px; border-radius: 2px; background: var(--rule);
+  transition: background var(--dur-slide) var(--ease);
+}
+.panel-handle:active .panel-grip { background: var(--ink-2); }
+
+/* 最小表示：主案の数値1行だけを残す（原則2＝結果は常に見えている、を満たす） */
+.result-summary { display: none; align-items: center; gap: 8px; min-height: 28px; }
+.result-panel.size-minimal .result-summary { display: flex; }
+.result-summary .sum-values {
+  font-family: var(--font-num); font-variant-numeric: tabular-nums;
+  font-size: 18px; font-weight: 700; white-space: nowrap;
+  overflow-x: auto; scrollbar-width: none;
+}
+.result-summary .sum-values::-webkit-scrollbar { display: none; }
+.result-summary .icon { width: 18px; height: 18px; margin-left: auto; flex: none; }
+.result-summary .icon.info  { color: var(--ink-2); }
+.result-summary .icon.warn  { color: var(--warn); }
+.result-summary .icon.alert { color: var(--alert); }
 .result-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; }
 .wall-readout { display: flex; align-items: baseline; gap: 8px; color: var(--flash); }
 .wall-label { font-size: 12px; font-weight: 600; }
@@ -357,6 +387,10 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .set-row label { font-size: 14px; }
 .set-row .input, .set-row .select { width: 120px; }
 .profile-card { border: 1px solid var(--rule); border-radius: var(--r-chip); padding: 12px; margin-bottom: 12px; }
+/* 校正フォームは常時表示。押すまで出ないボタンでは発見されない（アプリの精度を決める中核機能） */
+.calib-form { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.calib-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+.calib-form .caption { display: block; color: var(--ink-2); font-size: 12px; margin-bottom: 8px; }
 .btn { min-height: var(--tap-min); padding: 0 16px; border-radius: var(--r-chip); font-weight: 600; font-size: 14px; }
 .btn-primary { background: var(--flash); color: #fff; }
 .btn-ghost { border: 1px solid var(--rule); color: var(--ink); }
