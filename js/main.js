@@ -15,7 +15,7 @@ function boot() {
 
 /**
  * SW を登録し、waiting が現れたときだけ更新バーを出す。
- * **自動リロードしない。** 押されたときだけ skipWaiting → reload（§6.4）。
+ * **自動リロードしない。** 押されたときだけ skipWaiting → reload（§6.5）。
  */
 function registerServiceWorker() {
   // file:// では登録できない。エラーを出さず黙って何もしない

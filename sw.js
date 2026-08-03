@@ -7,10 +7,10 @@
 // 追加を忘れるとオンラインでは動くがオフラインで壊れる。開発中は常にオンラインなので
 // 気づけない。`bash tools/check-sw-assets` で機械的に検出する。
 //
-// 自動リロードは実装しない（同 §6.4）。新しい SW は waiting に留め、
+// 自動リロードは実装しない（同 §6.5）。新しい SW は waiting に留め、
 // ユーザーが更新バーを押したときだけ skipWaiting する。現場で計算中に画面が飛ぶのが最悪の体験。
 
-const CACHE = 'expo-v1';
+const CACHE = 'expo-v2';
 
 // すべて相対パス。GitHub Pages のプロジェクトサイトは /<repo>/ 配下なので絶対パスは 404 になる。
 const ASSETS = [
@@ -48,8 +48,12 @@ const ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
+    // **HTTP キャッシュをバイパスする（cache: 'reload'）。** これを外すと、変更したファイルが
+    // ブラウザの HTTP キャッシュに残っている間に install が走り、古い中身をプリキャッシュする。
+    // GitHub Pages は max-age=600 を返すので10分間そのリスクがある。
+    // CACHE を上げても中身が古い、という検出困難な事故になる（MAINTENANCE.md §6.3）。
     // addAll は1件でも失敗すると reject する。部分的なキャッシュを残さないためこれを使う
-    await cache.addAll(ASSETS);
+    await cache.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' })));
   })());
   // ここで skipWaiting しない。waiting に留めてユーザーの操作を待つ
 });
