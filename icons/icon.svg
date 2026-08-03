@@ -1,0 +1,30 @@
+<!-- 露出アシスト アイコン（any 用）。
+     図形のみで構成し、外部フォントも文字も使わない（環境差が出ないようにする）。
+     モチーフ：絞り羽根（6枚）＋下端の EV 目盛り。単色2トーン、グラデーションなし。
+     再生成：rsvg-convert -w 192 -h 192 icons/icon.svg -o icons/icon-192.png -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#14448F"/>
+
+  <!-- 絞り羽根：中心 (256,228)、外径 150。6枚の羽根を 60° ずつ回して重ねる -->
+  <g transform="translate(256 228)" fill="#F4F6F8">
+    <g>
+      <path d="M0 -150 L130 -75 L86 0 Z"/>
+      <g transform="rotate(60)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <g transform="rotate(120)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <g transform="rotate(180)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <g transform="rotate(240)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <g transform="rotate(300)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+    </g>
+    <!-- 中央の抜き（開口部）。羽根と同色の地に対して背景色で抜く -->
+    <circle r="44" fill="#14448F"/>
+  </g>
+
+  <!-- EV 目盛り：中央が長い罫（適正）、左右に 1/3段刻みの短い罫 -->
+  <g fill="#F4F6F8">
+    <rect x="252" y="392" width="8" height="52" rx="4"/>
+    <rect x="196" y="404" width="6" height="28" rx="3"/>
+    <rect x="310" y="404" width="6" height="28" rx="3"/>
+    <rect x="140" y="410" width="6" height="16" rx="3"/>
+    <rect x="366" y="410" width="6" height="16" rx="3"/>
+  </g>
+</svg>

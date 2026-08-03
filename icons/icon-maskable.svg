@@ -1,0 +1,27 @@
+<!-- maskable 用。Android が円形・角丸・水滴などで切り抜くため、
+     主要な図形を中央 60%（=512 の内 307px、四辺に 102px の余白）に収める。
+     背景は全面ベタ塗り（切り抜き後も縁が欠けないように）。
+     再生成：rsvg-convert -w 512 -h 512 icons/icon-maskable.svg -o icons/icon-maskable.png -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#14448F"/>
+
+  <!-- 安全領域（中央60%）に収めるため、any 版の 0.58 倍で中央に配置。
+       図形は局所座標で y=-170〜226 に広がるので、その中心(28)を打ち消して垂直中央に揃える。 -->
+  <g transform="translate(256 240) scale(0.58)">
+    <g transform="translate(0 -20)" fill="#F4F6F8">
+      <path d="M0 -150 L130 -75 L86 0 Z"/>
+      <g transform="rotate(60)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <g transform="rotate(120)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <g transform="rotate(180)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <g transform="rotate(240)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <g transform="rotate(300)"><path d="M0 -150 L130 -75 L86 0 Z"/></g>
+      <circle cx="0" cy="-20" r="44" fill="#14448F"/>
+    </g>
+    <!-- EV 目盛り（縮小後も潰れない太さにする） -->
+    <g fill="#F4F6F8" transform="translate(0 200)">
+      <rect x="-6" y="-26" width="12" height="52" rx="6"/>
+      <rect x="-84" y="-14" width="10" height="28" rx="5"/>
+      <rect x="74" y="-14" width="10" height="28" rx="5"/>
+    </g>
+  </g>
+</svg>

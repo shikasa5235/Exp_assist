@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# sw.js の ASSETS と、実際に参照されているローカルファイルを突き合わせる。
+#
+#   使い方（リポジトリのルートで）:  bash tools/check-sw-assets
+#   不一致が1件でもあれば終了コード 1。
+#
+# なぜ必要か：ASSETS の追加漏れは**オンラインでは動作しオフラインでのみ壊れる**。
+# 開発中は常にオンラインなので気づけない（MAINTENANCE.md §6.2 の2番目に多い事故）。
+#
+# 検査は2方向：
+#   (1) 参照されているのに ASSETS に無い  → オフラインで壊れる
+#   (2) ASSETS にあるのにディスクに無い    → install が addAll で失敗し SW が入らない
+set -u
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "$ROOT" || return 2 2>/dev/null || exit 2
+
+for f in sw.js index.html; do
+  if [ ! -f "$f" ]; then
+    echo "ERROR: $f が見つかりません（$ROOT で実行してください）"
+    return 2 2>/dev/null || exit 2
+  fi
+done
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# ---- 意図的な除外（アプリの実行に不要。sw.js のコメントと MAINTENANCE.md §6 に理由を明記）----
+#   tools/       開発用スクリプト
+#   docs/        仕様書・マニュアル原稿（アプリが読むのは index.html 内の写しだけ）
+#   tests.html   開発用の検証ページ。オフラインで動かす必要がない
+is_excluded() {
+  case "$1" in
+    tools/*|docs/*|tests.html) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 1) sw.js の ASSETS を取り出す（'./x' の形の文字列。先頭の ./ は落として正規化）
+sed -n '/^const ASSETS = \[/,/^\];/p' sw.js \
+  | grep -oE "'\./[^']*'" | tr -d "'" | sed 's|^\./||' | sort -u > "$TMP/assets.txt"
+# './'（ルート）は index.html と同じものなので別扱いにする
+has_root=$(grep -cx '' "$TMP/assets.txt" || true)
+grep -vx '' "$TMP/assets.txt" > "$TMP/assets-files.txt" || true
+
+n_assets=$(wc -l < "$TMP/assets.txt")
+if [ "$n_assets" -eq 0 ]; then
+  echo "ERROR: sw.js から ASSETS を抽出できませんでした"
+  return 2 2>/dev/null || exit 2
+fi
+
+# 2) 実際に参照されているローカルファイルを集める
+#    index.html の href/src と、js/*.js の import 先（相対パス）
+: > "$TMP/refs.txt"
+grep -oE '(href|src)="\./[^"]+"' index.html \
+  | sed -E 's/.*="\.\///; s/"$//' >> "$TMP/refs.txt"
+for f in js/*.js; do
+  [ -f "$f" ] || continue
+  tr '\n' ' ' < "$f" | grep -oE "from '\./[^']+'" | sed -E "s|from '\./||; s|'$||" \
+    | sed "s|^|js/|" >> "$TMP/refs.txt"
+done
+# エントリポイントと SW 自身、マニフェストは常に必要
+echo "index.html" >> "$TMP/refs.txt"
+sort -u "$TMP/refs.txt" -o "$TMP/refs.txt"
+
+# 3) (1) 参照されているのに ASSETS に無い
+fail=0
+while read -r ref; do
+  [ -n "$ref" ] || continue
+  is_excluded "$ref" && continue
+  [ "$ref" = "sw.js" ] && continue   # SW 自身はキャッシュ対象にしない（ブラウザが管理する）
+  if ! grep -qx "$ref" "$TMP/assets-files.txt"; then
+    echo "MISSING(assets): $ref が参照されているが sw.js の ASSETS に無い（オフラインで壊れる）"
+    fail=1
+  fi
+done < "$TMP/refs.txt"
+
+# 4) (2) ASSETS にあるのにディスクに無い
+while read -r a; do
+  [ -n "$a" ] || continue
+  if [ ! -e "$a" ]; then
+    echo "MISSING(disk): ASSETS の $a がディスクに無い（install が失敗して SW が入らない）"
+    fail=1
+  fi
+done < "$TMP/assets-files.txt"
+
+# 5) './'（ルート）が入っているか
+if [ "$has_root" -eq 0 ]; then
+  echo "MISSING(assets): './' が ASSETS に無い（start_url が オフラインで開けない）"
+  fail=1
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo "NG: ASSETS と参照が一致しません（ASSETS $n_assets 件）"
+  exit 1
+fi
+
+echo "OK: ASSETS $n_assets 件がすべてディスクに存在し、参照されるファイルの漏れもゼロ"
+echo "    除外（意図的）: tools/ docs/ tests.html"
+exit 0

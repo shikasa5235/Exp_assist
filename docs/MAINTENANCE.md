@@ -177,16 +177,45 @@ const CACHE = 'expo-v1';   // ← 必ずインクリメントする
 
 ### 6.2 ファイルを追加したら
 
-```js
-const ASSETS = [
-  './', './index.html', './css/style.css',
-  './js/main.js', './js/stops.js', /* … */
-  // ← 新しいファイルをここに追加する
-];
+**`ASSETS` に足す。追加を忘れると、オンラインでは動くがオフラインで壊れる。**
+開発中は常にオンラインなので**気づかない**。これが2番目に多い事故。
+
+```bash
+bash tools/check-sw-assets   # 追加漏れを機械的に検出する（リリース前チェックに含める）
 ```
 
-**追加を忘れると、オンラインでは動くがオフラインで壊れる。**
-開発中は常にオンラインなので**気づかない**。これが2番目に多い事故。
+このツールは2方向を見る。
+
+| 検査 | 意味 |
+| --- | --- |
+| `MISSING(assets)` | 参照されているのに `ASSETS` に無い → **オフラインで壊れる** |
+| `MISSING(disk)` | `ASSETS` にあるのにディスクに無い → `addAll` が失敗し **SW が入らない** |
+
+**現在の ASSETS（20件）**
+
+```
+'./'                        './index.html'              './manifest.webmanifest'
+'./css/style.css'
+'./js/main.js'              './js/compute.js'           './js/state.js'
+'./js/ui.js'                './js/wheel.js'             './js/storage.js'
+'./js/stops.js'             './js/exposure.js'          './js/flash.js'
+'./js/filters.js'           './js/advisor.js'           './js/scenes.js'
+'./icons/icon-192.png'      './icons/icon-512.png'
+'./icons/icon-maskable.png' './icons/apple-touch-icon.png'
+```
+
+**意図的に入れないもの（将来「なぜ無いのか」を追えるように残す）**
+
+| 除外 | 理由 |
+| --- | --- |
+| `tools/` | 開発用スクリプト。アプリの実行に不要 |
+| `docs/` | 仕様書・マニュアル原稿。アプリが読むのは `index.html` 内の写しだけ |
+| `tests.html` | 開発用の検証ページ。オフラインで動かす必要がない |
+| `sw.js` 自身 | ブラウザが管理する。キャッシュ対象にしない |
+
+**テスト #33 は `docs/exposure-app-manual.md` を fetch する。** そのため
+**SW 登録後にオフラインで `tests.html` を開くと #33 が失敗する。これは想定どおりの挙動。**
+テストはオンライン（ローカルサーバー）で実行する。
 
 ### 6.3 リリース時の必須手順
 
@@ -399,6 +428,7 @@ push 前に実施する。
 
 ### 自動で見るもの
 
+- [ ] `bash tools/check-sw-assets` が OK（**ASSETS の追加漏れ**。オフラインでのみ壊れるため機械で見る）
 - [ ] `bash tools/check-modules` が OK（import/export の整合と**使用名の import 漏れ**）
 - [ ] `bash tools/check-help-anchors` が OK（`helpId` のアンカーが `index.html` に実在）
 - [ ] `tests.html` が全緑（現在 62 件。ブラウザで開いて確認する）
