@@ -65,7 +65,10 @@
 /* hidden 属性を常に効かせる。クラス側の display 指定（flex/grid など）は
    UA 既定の [hidden]{display:none} より詳細度が高く、これが無いと非表示にならない。 */
 [hidden] { display: none !important; }
-html, body { height: 100%; }
+/* iOS Safari の 100vh / 100% はアドレスバーが隠れた状態の高さを返すため、
+   下端の固定要素がアドレスバーに潜る。dvh（動的ビューポート）で追従させる。
+   dvh 非対応の古いブラウザには 100% がフォールバックとして残る。 */
+html, body { height: 100%; height: 100dvh; }
 body {
   margin: 0;
   background: var(--paper);
@@ -279,14 +282,26 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .result-panel {
   position: sticky; bottom: 0; z-index: 15; flex: none;
   background: var(--panel); border-top: 1px solid var(--rule);
+  /* ホームバー（safe-area）の分だけ下に余白を足す。
+     Safari のアドレスバーは safe-area に含まれないので、そちらは body の dvh で吸収する。 */
   padding: 0 16px calc(10px + var(--sab));
   transition: max-height var(--dur-panel) var(--ease);
-  max-height: 46vh; overflow-y: auto;
+  max-height: 46vh; max-height: 46dvh; overflow-y: auto;
 }
-/* 高さ3段階。max-height だけを変え、中身の出し分けは hidden で行う */
-.result-panel.size-expanded { max-height: 60vh; }
-.result-panel.size-normal   { max-height: 46vh; }
-.result-panel.size-minimal  { max-height: 56px; overflow: hidden; }
+/* 高さ3段階。vh はアドレスバーの分だけはみ出すので dvh を使う（vh はフォールバック） */
+.result-panel.size-expanded { max-height: 70vh; max-height: 70dvh; }
+.result-panel.size-normal   { max-height: 46vh; max-height: 46dvh; }
+/* 最小：px でクリップすると数値が見切れる。中身を隠して自然な高さにし、下限だけ確保する */
+.result-panel.size-minimal {
+  max-height: none;
+  min-height: calc(72px + var(--sab));
+  overflow: hidden;
+}
+.result-panel.size-minimal .result-head,
+.result-panel.size-minimal .ev-ruler,
+.result-panel.size-minimal .result-systems,
+.result-panel.size-minimal .path-compare,
+.result-panel.size-minimal .warnings { display: none; }
 
 /* ハンドル：視覚的な横棒は 32×4px、当たり判定は 44px 以上 */
 .panel-handle {
@@ -399,7 +414,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 
 /* ===== トースト =================================================== */
 .toast {
-  position: fixed; left: 50%; bottom: calc(56vh + 12px); transform: translateX(-50%);
+  position: fixed; left: 50%; bottom: calc(56vh + 12px); bottom: calc(56dvh + 12px); transform: translateX(-50%);
   max-width: calc(100vw - 32px); z-index: 40;
   background: var(--ink); color: var(--paper); font-size: 13px; padding: 10px 16px; border-radius: var(--r-pill);
   box-shadow: 0 4px 16px var(--overlay);
@@ -512,7 +527,7 @@ body.sheet-open { overflow: hidden; }
   .scroll-body { flex: 1 1 60%; padding-top: calc(var(--header-h) + var(--sat) + 16px); }
   .result-panel {
     position: sticky; top: 0; align-self: flex-start; flex: 0 0 40%; max-width: 420px;
-    height: 100vh; max-height: none; border-top: none; border-left: 1px solid var(--rule);
+    height: 100vh; height: 100dvh; max-height: none; border-top: none; border-left: 1px solid var(--rule);
     padding-top: calc(var(--header-h) + var(--sat) + 16px);
   }
   .result-systems.dual { grid-template-columns: 1fr; }

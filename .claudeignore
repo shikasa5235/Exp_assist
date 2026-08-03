@@ -1,0 +1,70 @@
+# ==========================================
+# .claudeignore (Claude Code用除外設定)
+# ==========================================
+
+# 1. 依存関係（超巨大ディレクトリのため必須）
+node_modules/
+vendor/
+venv/
+env/
+.venv/
+__pycache__/
+
+# 2. ビルド成果物・キャッシュ
+dist/
+build/
+out/
+.next/
+.nuxt/
+.cache/
+coverage/
+*.pyc
+*.class
+*.o
+
+# 3. 巨大なロックファイル（依存関係のデバッグ時以外は不要）
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Gemfile.lock
+poetry.lock
+
+# 4. ログファイル・データベース
+*.log
+logs/
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql
+
+# 5. OS・エディタ設定
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+
+# 6. 機密情報・認証情報（セキュリティ保護）
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# 7. バイナリ・メディアファイル（テキスト解析不可・高コスト）
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.ico
+*.mp4
+*.mp3
+*.zip
+*.tar.gz
+*.exe
+*.dll
