@@ -10,7 +10,7 @@
 // 自動リロードは実装しない（同 §6.5）。新しい SW は waiting に留め、
 // ユーザーが更新バーを押したときだけ skipWaiting する。現場で計算中に画面が飛ぶのが最悪の体験。
 
-const CACHE = 'expo-v2';
+const CACHE = 'expo-v3';
 
 // すべて相対パス。GitHub Pages のプロジェクトサイトは /<repo>/ 配下なので絶対パスは 404 になる。
 const ASSETS = [

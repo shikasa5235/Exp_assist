@@ -2,7 +2,7 @@
 // 仕様 §8・§9・§10。警告は必ず「何段足りない／超過している」を数値で示す。
 
 import { evTarget, solveSS, solveN, handShakeLimit } from './exposure.js';
-import { solveND } from './filters.js';
+import { solveND, ndLabel } from './filters.js';
 import { gnBase, applyModifier, applyIso, effectiveGN, hssLoss } from './flash.js';
 import { F, SS, snap } from './stops.js';
 import { HELP } from './scenes.js';
@@ -57,20 +57,62 @@ export function shakeWarning(ssReal, focal, isStops = 0) {
 }
 
 /**
+ * 必要減光量から「装着すべき ND の組み合わせ」を解く。仕様 §6。
+ *
+ * **必要段数は切り上げる。** ND は整数段でしか存在しないため。切り捨てると露出過剰が残り、
+ * 装着しても警告が消えない（実機で確認された症状）。切り上げた余りは自由軸が吸収できる
+ * ——自由軸は「明るすぎ」側の限界に張り付いているので、暗くする方向には動かせるため。
+ *
+ * @param {number[]} ownedND 所有 ND の段数（例：[1,2,3,4]）
+ * @param {number} requiredStops いま不足している減光段数（連続値）
+ * @param {number} [attachedStops=0] すでに装着済みの減光段数（合計必要量に含める）
+ * @returns {{text:string,ok:boolean,solution:import('./filters.js').NDSolution|null,need:number}}
+ *   ok=true のとき text は「ND2+ND16（5段）を装着」形式（後ろに「してください」を継げられる）。
+ *   ok=false のとき text は理由を述べる完結した文か空文字（継いではいけない）。
+ */
+export function ndAdvice(ownedND, requiredStops, attachedStops = 0) {
+  const owned = ownedND || [];
+  const need = Math.ceil(attachedStops + requiredStops - 1e-9);
+  if (need <= 0 || owned.length === 0) {
+    return { text: '', ok: false, solution: null, need: Math.max(0, need) };
+  }
+  const sol = solveND(owned, need);
+  if (!sol || !sol.count) {
+    const max = owned.reduce((a, b) => a + b, 0);
+    return { text: `所有 ND（合計${max}段）では ${need}段 に届きません`, note: '', ok: false, solution: null, need, overshoot: 0 };
+  }
+  // 行き過ぎ量。所有 ND の刻みによっては 4.7段 に対して 7段 しか作れない、ということが起こる。
+  // このとき 2.3段 暗くなり、自由軸では吸収しきれない。**黙って勧めない。**
+  // 1/3段未満なら自由軸が吸収するので書かない（書くと端数の説明が常時出て読み飛ばされる）。
+  const overshoot = sol.totalStops - (attachedStops + requiredStops);
+  return {
+    text: `${ndLabel(sol.filters)}（${sol.totalStops}段）を装着`,
+    note: overshoot >= THIRD_STOP ? `（${formatStops(overshoot)}段 暗くなります）` : '',
+    ok: true, solution: sol, need, overshoot,
+  };
+}
+
+/**
  * 明るすぎて SS 上限でも露出オーバーになる場合の減光警告。仕様 §9。
+ * **必要段数は丸めずに 1/3段の精度で出す。** 整数に丸めるとその通り装着しても合わない。
  * @param {number} neededT 適正に必要な SS（秒、SS 上限より速い＝小さいとオーバー）
  * @param {number} maxSSReal 機種の最速 SS（秒、厳密値）
+ * @param {{ownedND?:number[],attachedStops?:number}} [opts] 組み合わせ提案の材料
  * @returns {{level:string,icon:string,message:string,stops:number}|null}
  */
-export function overBrightWarning(neededT, maxSSReal) {
+export function overBrightWarning(neededT, maxSSReal, opts = {}) {
   if (neededT >= maxSSReal) return null;
   const stops = Math.log2(maxSSReal / neededT);
+  if (stops < THIRD_STOP) return null; // 1/3段未満は表示の丸め幅に埋もれる。行動に移せない
+  const { ownedND = [], attachedStops = 0 } = opts;
+  const adv = ndAdvice(ownedND, stops, attachedStops);
   return {
     level: 'alert',
     icon: 'nd',
     helpId: HELP.nd,
     stops,
-    message: `明るすぎます。約${formatStops(stops)}段の減光が必要です（ND）`,
+    message: `明るすぎます。${formatStops(stops)}段の減光が必要です`
+      + (adv.ok ? `。${adv.text}してください${adv.note}` : adv.text ? `。${adv.text}` : '（ND）'),
   };
 }
 
@@ -83,6 +125,7 @@ export function overBrightWarning(neededT, maxSSReal) {
 export function isoFloorWarning(neededISO, expandedISOMin) {
   if (neededISO >= expandedISOMin) return null;
   const stops = Math.log2(expandedISOMin / neededISO);
+  if (stops < THIRD_STOP) return null; // 1/3段未満は表示の丸め幅に埋もれる
   return {
     level: 'alert',
     icon: 'nd',
@@ -213,11 +256,14 @@ export function daylightSync(p) {
     const loss = hssLoss(hssBaseLoss, syncSpeedReal, tUsed);
     const gnEff = effectiveGN(gnIso, 0, 0, loss);
     const achievableOffset = ambientOffset + clampStops;
+    // 1/3段未満のはみ出しは「背景が明るくなる」と言うほどの差ではない（表示は1/3段グリッド）。
+    // ここを 1e-6 にすると端数のたびに達成不能の警告が出て、消しようがなくなる。
+    const clamped = clampStops >= THIRD_STOP;
     out.hssPath = {
       ssReal: tUsed, ss: snap(SS, tUsed), hssLoss: loss, gnEff, reach: gnEff / desiredN,
-      ssClamped: clampStops > 1e-6, clampStops, achievableOffset,
+      ssClamped: clamped, clampStops, achievableOffset,
     };
-    if (clampStops > 1e-6) {
+    if (clamped) {
       out.warnings.push({
         level: 'warn', icon: 'hss', helpId: HELP.syncWall,
         message: `HSS経路は SS上限のため背景は ${formatOffset(achievableOffset)}段までです（${formatStops(clampStops)}段明るくなります）`,

@@ -369,7 +369,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .path-compare .caption { font-size: 12px; color: var(--warn); font-family: var(--font-text); }
 
 .warnings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-.warn-item { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.45; }
+/* flex-wrap は警告内の解決ボタン（.warn-action）を独立した行に落とすため */
+.warn-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.45; }
 .warn-item .icon { width: 18px; height: 18px; margin-top: 1px; flex: none; }
 .warn-item.info  { color: var(--ink-2); } .warn-item.info .icon  { color: var(--ink-2); }
 .warn-item.warn  { color: var(--warn); }  .warn-item.warn .icon  { color: var(--warn); }
@@ -516,6 +517,15 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .warn-help:active { background: var(--press); }
 .warn-help .icon { width: 18px; height: 18px; }
+/* 警告内の解決ボタン。設定タブへ移動せずその場で直せるようにする（袋小路を作らないため） */
+/* 独立した行に落として全幅。指1本・片手で押せる高さを確保する */
+.warn-action {
+  flex: 0 0 100%; min-height: var(--tap-min); margin-top: 2px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid currentColor; border-radius: var(--r-chip);
+  background: transparent; color: inherit; font: inherit; font-weight: 600;
+}
+.warn-action:active { background: var(--press); }
 body.sheet-open { overflow: hidden; }
 
 /* ===== レスポンシブ（UI仕様 §14）================================ */

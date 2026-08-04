@@ -624,6 +624,143 @@
         pass: ok,
       };
     });
+
+    // ===== 露出過不足の警告：1/3段の閾値と ND の組み合わせ提示 ================
+    // 露出は1/3段グリッドに吸着し、ND は1段単位、目標 EV は連続値。3つが噛み合わないと
+    // 必ず端数が残る。端数に警告が発火すると構造上いつまでも消えない（実機で確認された症状）。
+    //
+    // 残差 s 段を作る EV：ss = maxSS / 2^s となる evBase を逆算する。
+    //   EV_target = log2(N² / ss) = log2(N²/maxSS) + s、evBase = EV_target − log2(ISO/100)
+    const OB_F = 1.4, OB_MAXSS = 1 / 8000, OB_ISO = 200;
+    const evForResidual = (s) => Math.log2((OB_F * OB_F) / OB_MAXSS) + s - Math.log2(OB_ISO / 100);
+    const overBrightState = (s) => makeState({
+      intent: 'blur', subject: 'static', focal: 50,
+      scene: { evBase: evForResidual(s), adjust: 0 },
+      camera: { isoMin: OB_ISO, maxSS: OB_MAXSS },
+      lens: { fMin: OB_F, fMax: 22 },
+    });
+    add('W1', '露出過剰の残差が 1/6段 なら減光警告を出さない（1/3段の閾値）', () => {
+      const d = compute(overBrightState(1 / 6));
+      const w = d.warnings.find((x) => /明るすぎ/.test(x.message));
+      // 閾値が効いた結果であることを示す（残差 0 で通っているのではない）
+      const ok = !w && d.warnings.every((x) => x.helpId === HELP.ok);
+      return {
+        expected: '減光警告なし（残差 0.17段 < 1/3段）',
+        actual: w ? w.message : `警告 ${d.warnings.map((x) => x.icon).join(',')}`,
+        pass: ok,
+      };
+    });
+    add('W2', '露出過剰の残差が 0.5段 なら警告を出す（閾値で潰しすぎない）', () => {
+      const d = compute(overBrightState(0.5));
+      const w = d.warnings.find((x) => /明るすぎ/.test(x.message));
+      // 0.5段は1/3段グリッド上で動かせる量。丸めず 1/3段の精度で出すこと
+      const ok = !!w && w.level === 'alert' && rel(w.stops, 0.5, 0.02) && /0\.5段の減光/.test(w.message);
+      return {
+        expected: 'alert / 「0.5段の減光が必要です」',
+        actual: w ? `${w.level} / ${w.message}` : '警告なし',
+        pass: ok,
+      };
+    });
+    add('W3', '計算タブ: 減光が必要なとき ND の組み合わせまで提示する', () => {
+      // F5.6(実体 5.657) / SS 1/250(実体 1/256) / EV16.7 → 必要 ISO は下限200 より 4.7段 低い。
+      // ND は整数段しかないので切り上げ 5段 → 所有[1,2,3,4] から ND2+ND16。
+      // 切り上げた 0.3段ぶんは自由軸(ISO)が吸収するので、装着すれば警告は消える。
+      const st = makeState({
+        ui: { tab: 'calc', theme: 'auto', firstRun: false },
+        scene: { evBase: 16.7, adjust: 0 },
+        camera: { isoMin: 200 },
+        lens: { fMin: F28, fMax: 22 },
+        manual: { fIndex: 15, ssIndex: 24, isoIndex: null, locks: { f: true, ss: true, iso: false } },
+        settings: { ownedND: [1, 2, 3, 4], hssBaseLoss: 2, ambientOffsetDefault: -1, comp: 0, blackMistStops: 0 },
+      });
+      const w = compute(st).manual.warning;
+      const ok = !!w && /4\.7段超過/.test(w.message) && /ND2\+ND16（5段）を装着/.test(w.message);
+      return {
+        expected: '「明るすぎます（4.7段超過）。ND2+ND16（5段）を装着／…」',
+        actual: w ? w.message : '警告なし',
+        pass: ok,
+      };
+    });
+    add('W3b', '計算タブ: W3 の提案どおり ND2+ND16 を装着すると警告が消える', () => {
+      const base = {
+        ui: { tab: 'calc', theme: 'auto', firstRun: false },
+        scene: { evBase: 16.7, adjust: 0 },
+        camera: { isoMin: 200 },
+        lens: { fMin: F28, fMax: 22 },
+        manual: { fIndex: 15, ssIndex: 24, isoIndex: null, locks: { f: true, ss: true, iso: false } },
+        settings: { ownedND: [1, 2, 3, 4], hssBaseLoss: 2, ambientOffsetDefault: -1, comp: 0, blackMistStops: 0 },
+      };
+      // 5段ぶん暗くなるので必要 ISO は 200×2^0.3 ≒ 246。下限を上回るのでクランプしない
+      const d = compute(makeState({ ...base, nd: [1, 4] }));
+      const ok = d.manual.warning === null && d.ambient.ndLabel === 'ND2+ND16';
+      return {
+        expected: '警告なし / ND2+ND16',
+        actual: `${d.manual.warning ? d.manual.warning.message : '警告なし'} / ${d.ambient.ndLabel} / ISO${d.ambient.isoLabel}`,
+        pass: ok,
+      };
+    });
+
+    add('W4', '行き過ぎ（暗すぎ）側も 1/3段の閾値：残差 1/6段 では出さず 0.5段 では出す', () => {
+      // 風景（F8固定・ISO下限200）。SS 系列最遅 30″（実体32秒）を s 段超える EV を逆算する：
+      //   ss = 64 / 2^(ev + 1) = 32·2^s  →  ev = −s
+      // 明るすぎ側（W1/W2）と対称に、1/3段未満は出さず 0.5段 は出すことを1件で示す。
+      const darkState = (s) => makeState({
+        intent: 'landscape', subject: 'static', focal: 50,
+        scene: { evBase: -s, adjust: 0 }, camera: { isoMin: 200 },
+      });
+      const short = (d) => d.warnings.find((x) => /暗すぎます/.test(x.message));
+      const w1 = short(compute(darkState(1 / 6)));
+      const w2 = short(compute(darkState(0.5)));
+      const ok = !w1 && !!w2 && w2.level === 'alert' && /0\.5段 足りません/.test(w2.message);
+      return {
+        expected: '1/6段→警告なし / 0.5段→alert「0.5段 足りません」',
+        actual: `${w1 ? w1.message : '警告なし'} ／ ${w2 ? w2.message : '警告なし'}`,
+        pass: ok,
+      };
+    });
+
+    // ===== 提案が別の警告を生まないこと（袋小路の解消）=======================
+    // ND はアンビエントとストロボの両方に等しく効く。ストロボが足りないからと ND を外すと
+    // アンビエントが明るすぎに戻る。実機で「ND を足す⇔外す」の往復になった症状の再現。
+    // 自由軸 ISO は下限200に張り付いており、明るくなる余地（slack）は 0。
+    const deadEndState = () => makeState({
+      ui: { tab: 'calc', theme: 'auto', firstRun: false },
+      intent: 'slowSync', subject: 'static',
+      scene: { evBase: 16.7, adjust: 0 },
+      camera: { isoMin: 200 },
+      lens: { fMin: F28, fMax: 22 },
+      nd: [4], // ND16
+      manual: { fIndex: 15, ssIndex: 24, isoIndex: null, locks: { f: true, ss: true, iso: false } },
+      profiles: makeState().profiles.map((p) => ({ ...p, powerCeilingStops: 2, minPowerStops: 7 })),
+      // 距離 1.5m：フル発光時の余剰 over ≒ 1.47段。上限2段（1/4）に 0.53段 届かない。
+      // over ≧ 0 なので「機材が届かない」ではなく「上限設定が邪魔している」側の分岐に入る。
+      flash: { profileId: 'p1', modifier: 'reflector', distance: 1.5, ambientOffset: -1, tripod: true, powerMode: 'auto', powerStops: 5 },
+    });
+    add('W5', '上限超過の警告に「ND を外す」を含めない（外すと明るすぎに戻るため）', () => {
+      const d = compute(deadEndState());
+      const w = d.warnings.find((x) => x.helpId === HELP.powerCeiling);
+      const ok = !!w && !/ND/.test(w.message) && (d.ndRemovable.slack <= 1 / 3);
+      return {
+        expected: '上限超過の警告あり／文面に ND を含まない（slack ≦ 1/3段）',
+        actual: w ? `slack=${d.ndRemovable.slack.toFixed(2)}段 / ${w.message}` : '上限超過の警告なし',
+        pass: ok,
+      };
+    });
+    add('W6', '上限超過の第一候補が「上限を上げる」で、その上限値が必要量を満たす', () => {
+      const d = compute(deadEndState());
+      const w = d.warnings.find((x) => x.helpId === HELP.powerCeiling);
+      // action.to が新しい上限。ここまで上げれば shortStops = max(0, 上限 − over) が 0 になる
+      const over = d.flash.over;
+      const firstIsRaise = !!w && /足りません。上限を .+ に上げる（この設定で撮れます）／/.test(w.message);
+      const satisfies = !!w && w.action && w.action.kind === 'raiseCeiling'
+        && Math.max(0, w.action.to - over) < 1e-9;
+      return {
+        expected: '第一候補が「上限を◯に上げる」／その上限で不足0段',
+        actual: w ? `${w.action ? `to=${POWER_STEPS[w.action.to].label} (over=${over.toFixed(2)})` : 'action なし'} / ${w.message}` : '警告なし',
+        pass: firstIsRaise && satisfies,
+      };
+    });
+
     add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {
       const a = compute(slowState({ flash: { profileId: 'p1', distance: 8, ambientOffset: -1, tripod: true } }));
       const b = compute(slowState({ flash: { profileId: 'p2', distance: 8, ambientOffset: -1, tripod: true } }));

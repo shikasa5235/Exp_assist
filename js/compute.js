@@ -8,8 +8,9 @@ import {
   gnBase, applyModifier, applyIso, effectiveGN, overStops, resolvePower, flashDuration,
   solveDistance, resolvePowerWithCeiling,
 } from './flash.js';
+import { ndName, ndLabel } from './filters.js';
 import {
-  shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning,
+  shakeWarning, overBrightWarning, freezeWarning, ndAdvice,
   daylightSync, slowSyncAmbient, formatStops, formatOffset, THIRD_STOP,
 } from './advisor.js';
 import { SUBJECTS, MODIFIERS, POWER_STEPS, HELP } from './scenes.js';
@@ -29,8 +30,17 @@ const DIFFRACTION_F_INDEX = 21;
  * @param {object} st @returns {number}
  */
 function ndStops(st) {
-  const nd = (st.nd || []).reduce((a, b) => a + b, 0);
-  return nd + (st.filters?.blackMist ? (st.settings.blackMistStops || 0) : 0);
+  return ndOnly(st) + (st.filters?.blackMist ? (st.settings.blackMistStops || 0) : 0);
+}
+
+/**
+ * 装着中 **ND だけ**の減光段数。組み合わせ提案（ndAdvice）の起点に使う。
+ * ブラックミストを含めてはいけない：ミストの減光は「残っている過剰段数」に既に反映済みなので、
+ * 合計必要量に足すと二重に数えて濃い ND を勧めてしまう。
+ * @param {object} st @returns {number}
+ */
+function ndOnly(st) {
+  return (st.nd || []).reduce((a, b) => a + b, 0);
 }
 
 /**
@@ -82,13 +92,33 @@ function modLossFor(prof, modifierKey) {
   return isUncalibrated(prof, modifierKey) ? modLossOf(modifierKey) : 0;
 }
 
-/** ND 段数 → 表示名（ND2/ND4/…）。 @param {number} stops @returns {string} */
-function ndName(stops) { return `ND${2 ** stops}`; }
-
-/** ND 段数配列 → 連結ラベル（例 "ND2+ND16"）。表示は薄い順に統一。装着なしは空文字。 */
-function ndLabelOf(stopsArr) {
-  if (!stopsArr || !stopsArr.length) return '';
-  return [...stopsArr].sort((a, b) => a - b).map(ndName).join('+');
+/**
+ * 「ND を1枚外す」を提案してよいか判定する。**提案が別の警告を生まないことの検証。**
+ *
+ * ND はレンズ前にあるのでアンビエントとストロボの両方に等しく効く。ストロボが足りないからと
+ * ND を外すと、アンビエントがその分そのまま明るくなる。アンビエント側に吸収する余地が
+ * 無ければ「明るすぎます」に置き換わるだけで、ユーザーは元の問題に戻される（袋小路）。
+ *
+ * **循環依存を避けるための設計：** 提案を当てた状態で `compute()` を再実行して警告を数える、
+ * という方法は取らない。`advisor` から `compute` を呼ぶと循環するうえ、提案の数だけ
+ * 全体計算が走る。代わりに「その提案が動かす軸に、動かす余地（slack）が何段あるか」を
+ * 各計算経路が1つの数値として出し、ここで解析的に比べる。
+ *
+ * @param {number[]} attached 装着中 ND の段数の配列
+ * @param {number} slackStops アンビエントが明るくなれる余地（段）。0 以下なら余地なし
+ * @param {number} [gainStops=0] この提案で埋めたい不足段数。アンビエント自身の不足を
+ *   埋める提案ならその分は行き過ぎに数えない。ストロボ側の不足なら 0（アンビエントは
+ *   合っているので、外した段数がまるごと行き過ぎになる）
+ * @returns {{stops:number,label:string}|null} 外すべき1枚。提案してはいけないときは null
+ */
+function ndRemovalOption(attached, slackStops, gainStops = 0) {
+  const list = attached || [];
+  if (!list.length) return null;
+  const thinnest = Math.min(...list); // いちばん薄い1枚＝副作用が最小
+  const overshoot = thinnest - gainStops;
+  // 行き過ぎが余地に収まらない（1/3段の許容つき）なら、明るすぎ警告に化けるだけ
+  if (overshoot > slackStops + THIRD_STOP) return null;
+  return { stops: thinnest, label: `${ndName(thinnest)} を外す` };
 }
 
 /** モディファイアキー → 減光段数。 @param {string} key @returns {number} */
@@ -174,22 +204,33 @@ function clampAmbient(r, st, ev) {
   const warnings = [];
   let { fReal, ssReal, isoReal } = r;
 
-  // 明るすぎ：必要SSが機種最速より速い → ND 段数を提示
+  // 明るすぎ：必要SSが機種最速より速い → 必要減光量と ND の組み合わせを提示
   if (ssReal < camera.maxSS) {
-    const w = overBrightWarning(ssReal, camera.maxSS);
+    const w = overBrightWarning(ssReal, camera.maxSS, { ownedND: settings.ownedND, attachedStops: ndOnly(st) });
     if (w) warnings.push(w);
     ssReal = camera.maxSS;
   }
-  // 暗すぎ：系列最遅を超える長秒 → クランプ
-  if (ssReal > SLOWEST) ssReal = SLOWEST;
+  // 暗すぎ：系列最遅（30″＝実体32秒）を超える長秒 → クランプ。**黙って切らない。**
+  // ND を足しすぎた（行き過ぎた）ときにここへ来る。明るすぎ側と対称に段数を出す。
+  if (ssReal > SLOWEST) {
+    const stops = Math.log2(ssReal / SLOWEST);
+    ssReal = SLOWEST;
+    if (stops >= THIRD_STOP) { // 明るすぎ側と同じ 1/3段の閾値
+      // 自由軸は SS。ND を外すと SS は速くなる方向へ動けるので、その余地を渡す
+      const drop = ndRemovalOption(st.nd, Math.log2(SLOWEST / camera.maxSS), stops);
+      const remedies = [drop ? drop.label : null, `ISO を ${formatStops(stops)}段上げる`, '三脚で長秒に耐える'].filter(Boolean);
+      warnings.push({ level: 'alert', icon: 'noise', helpId: HELP.lightShort,
+        message: `暗すぎます。SS は ${snap(SS, SLOWEST).label} が限界で ${formatStops(stops)}段 足りません。${remedies.join('／')}` });
+    }
+  }
 
   // 光量不足：必要ISOが上限超過（夜・手持ちなど）
-  if (r.shortStops > 1e-3) {
+  if (r.shortStops >= THIRD_STOP) {
     warnings.push({ level: 'alert', icon: 'noise', helpId: HELP.lightShort,
       message: `光量が${formatStops(r.shortStops)}段足りません。開放を明るく、または三脚が必要です` });
   }
   // 被写体ブレ：止めたいのに必要SSへ届かない
-  if (r.missSS != null && ssReal > r.missSS) {
+  if (r.missSS != null && Math.log2(ssReal / r.missSS) >= THIRD_STOP) {
     const s = Math.log2(ssReal / r.missSS);
     warnings.push({ level: 'warn', icon: 'motion', helpId: HELP.motion,
       message: `被写体が流れます。1/${Math.round(1 / r.missSS)} 以上が必要（${formatStops(s)}段不足）` });
@@ -201,7 +242,7 @@ function clampAmbient(r, st, ev) {
   }
   // 被写体ブレ基準（止める意図以外でも動く被写体なら）
   const req = subjectSSOf(subject);
-  if (intent !== 'freeze' && req != null && ssReal > req) {
+  if (intent !== 'freeze' && req != null && Math.log2(ssReal / req) >= THIRD_STOP) {
     warnings.push({ level: 'warn', icon: 'motion', helpId: HELP.motion,
       message: `被写体が流れます。1/${Math.round(1 / req)} 以上にしてください` });
   }
@@ -317,19 +358,34 @@ function resolveFlashSide(st, prof, gnIso, N, ndTotal, hssLossStops, d) {
     if (shortStops >= THIRD_STOP) {
       const dTxt = recommended.toFixed(1);
       if (over < -1e-9) {
-        // フル発光でも届かない＝ストロボ側の物理的な光量不足（到達距離 < 設定距離）。
-        // アンビエント側の光量不足（ISO上限・開放でも足りない）とは対処が違うので別セクションへ。
+        // フル発光でも届かない＝**この機材では届かない**（到達距離 < 設定距離）。上限を上げても
+        // 解決しないのでその案は出さない。アンビエント側の光量不足とは対処が違うので別セクション。
         const n = formatStops(-over);
         const remedies = [`距離を ${(gnFull / N).toFixed(1)}m まで詰める`, `ISO を ${n}段上げる`, `F を ${n}段開ける`];
-        if (ndTotal > 0) remedies.push('ND を外す');
+        // ND を外す提案は、アンビエントに明るくなる余地があるときだけ（袋小路を作らない）
+        const rm = d.ndRemovable || { filters: [], slack: 0 };
+        const drop = ndRemovalOption(rm.filters, rm.slack);
+        if (drop) remedies.push(drop.label);
         d.warnings.push({ level: 'alert', icon: 'flash', helpId: HELP.flashShort,
-          message: `フル発光でも ${n}段 足りません（到達 ${(gnFull / N).toFixed(1)}m／設定 ${setDistance}m）。${remedies.join('／')}` });
+          message: `この機材では届きません。フル発光でも ${n}段 足りません（到達 ${(gnFull / N).toFixed(1)}m／設定 ${setDistance}m）。${remedies.join('／')}` });
       } else {
-        // 光は足りているが、発光量の上限（強い側の限界）に当たって使えない＝設定の問題。
+        // 光は足りているが、発光量の上限（強い側の限界）に当たって使えない＝**設定の問題**。
+        // powerCeilingStops は機材の限界ではなくユーザーの好み。いちばん簡単な解決は設定を戻すこと。
+        // だから「上限を上げる」を第一候補にする。**ここで「ND を1枚外す」は出さない**：
+        // ND を外すとアンビエントが明るすぎに戻り、その対処でまた ND を足すことになる（袋小路）。
         const n = formatStops(shortStops);
-        const remedies = [`距離を ${dTxt}m まで詰める`, `ISO を ${n}段上げる`];
-        if (ndTotal > 0) remedies.push('ND を1枚外す');
-        d.warnings.push({ level: 'alert', icon: 'flash', helpId: HELP.powerCeiling,
+        // 必要量を満たす最も弱い上限＝over 以下でいちばん大きい整数段。over ≧ 0 なのでこの
+        // 分岐では必ず存在する（存在しない＝上げても届かない場合は上の over < 0 側に入る）。
+        // over < ceiling ≦ minPower なので floor(over) < ceiling（必ず「上げる」側になる）。
+        // 範囲外の添字で POWER_STEPS[to] が undefined になるのを防ぐため念のためクランプする。
+        const to = Math.max(0, Math.min(minPower, Math.floor(over + 1e-9)));
+        const action = { kind: 'raiseCeiling', to, label: `上限を ${POWER_STEPS[to].label} に上げる` };
+        const remedies = [
+          `${action.label}（この設定で撮れます）`,
+          `距離を ${dTxt}m まで詰める`,
+          `ISO を ${n}段上げる`,
+        ];
+        d.warnings.push({ level: 'alert', icon: 'flash', helpId: HELP.powerCeiling, action,
           message: `上限 ${powerLabel} では ${n}段 足りません。${remedies.join('／')}` });
       }
     }
@@ -428,20 +484,28 @@ function equivalentList(ev, st, mainFIndex) {
  * @param {'F'|'SS'|'ISO'} axis 限界に達した自由軸
  * @param {number} stops 不足/超過の段数
  * @param {'short'|'bright'} kind short=光量不足（上限張り付き）／bright=明るすぎ（下限張り付き）
- * @param {boolean} hasND ND 装着中か
+ * @param {{filters:number[],attached:number,owned:number[],slack:number}} nd
+ *   装着中 ND・その合計段数・所有 ND・自由軸が明るくなれる余地
  */
-function manualShort(axis, stops, kind, hasND) {
+function manualShort(axis, stops, kind, nd) {
   const N = formatStops(stops);
   const inc = { F: `F を ${N}段開ける`, SS: `SS を ${N}段遅くする`, ISO: `ISO を ${N}段上げる` };
   const dec = { F: `F を ${N}段絞る`, SS: `SS を ${N}段速める`, ISO: `ISO を ${N}段下げる` };
   const others = ['F', 'SS', 'ISO'].filter((a) => a !== axis);
   if (kind === 'short') {
     const axisRem = others.map((a, i) => (i === 0 ? 'ロックを外して ' : '') + inc[a]);
-    const remedies = [hasND ? 'ND を1枚外す' : null, ...axisRem].filter(Boolean);
+    // ND を外す提案は、外して明るくなる分を自由軸が吸収できるときだけ出す。
+    // 不足を埋めるのが目的なので、埋まる分（stops）は行き過ぎに数えない。
+    const drop = ndRemovalOption(nd.filters, nd.slack, stops);
+    const remedies = [drop ? drop.label : null, ...axisRem].filter(Boolean);
     return { level: 'alert', icon: 'alert', helpId: HELP.calcClamp, message: `${axis} が ${N}段 足りません。${remedies.join('／')}` };
   }
   const axisRem = others.map((a, i) => (i === 0 ? 'ロックを外して ' : '') + dec[a]);
-  return { level: 'alert', icon: 'alert', helpId: HELP.calcClamp, message: `明るすぎます（${N}段超過）。${['ND を足す', ...axisRem].join('／')}` };
+  // 「ND を足す」で止めると、何段のどれを足すかはユーザーが計算することになる。
+  // solveND は所有 ND から答えを出せるので、持っている答えを出す（かんたんタブと同じ扱い）。
+  const adv = ndAdvice(nd.owned, stops, nd.attached);
+  const ndRem = adv.text ? `${adv.text}${adv.note}` : 'ND を足す';
+  return { level: 'alert', icon: 'alert', helpId: HELP.calcClamp, message: `明るすぎます（${N}段超過）。${[ndRem, ...axisRem].join('／')}` };
 }
 
 function manualResult(ev, st) {
@@ -471,20 +535,26 @@ function manualResult(ev, st) {
   };
   const spec = LIMITS[computedKey];
   const value = { f: fReal, ss: ssReal, iso: isoReal }[computedKey];
+  // 自由軸が「明るくなる方向」へまだ何段動けるか。ND を1枚外すとシーンはその段数ぶん
+  // 明るくなるので、この余地を超える提案は「明るすぎます」に化ける（ndRemovalOption が使う）。
+  // どちらの端が明るい側かは軸ごとに違うので、LIMITS の loKind/hiKind から引く。
+  const brightIsLo = spec.loKind === 'bright';
+  const ndSlack = brightIsLo ? spec.stops(value, spec.lo) : spec.stops(spec.hi, value);
+  const ndCtx = { filters: st.nd || [], attached: ndOnly(st), owned: settings.ownedND, slack: ndSlack };
   let warning = null;
   let clampedValue = value;
   if (value < spec.lo) {
     clampedValue = spec.lo;
-    warning = clampWarning(spec, spec.stops(spec.lo, value), spec.loKind, nd > 0);
+    warning = clampWarning(spec, spec.stops(spec.lo, value), spec.loKind, ndCtx);
   } else if (value > spec.hi) {
     clampedValue = spec.hi;
-    warning = clampWarning(spec, spec.stops(value, spec.hi), spec.hiKind, nd > 0);
+    warning = clampWarning(spec, spec.stops(value, spec.hi), spec.hiKind, ndCtx);
   }
   if (computedKey === 'f') fReal = clampedValue;
   else if (computedKey === 'ss') ssReal = clampedValue;
   else isoReal = clampedValue;
 
-  return { ...snapTriple(fReal, ssReal, isoReal), computedKey, warning };
+  return { ...snapTriple(fReal, ssReal, isoReal), computedKey, warning, ndSlack };
 }
 
 /**
@@ -492,12 +562,12 @@ function manualResult(ev, st) {
  * @param {{axis:string}} spec
  * @param {number} stops 不足/超過の段数
  * @param {'short'|'bright'} kind
- * @param {boolean} hasND
+ * @param {{attached:number,owned:number[]}} nd
  * @returns {{level:string,icon:string,message:string}|null}
  */
-function clampWarning(spec, stops, kind, hasND) {
+function clampWarning(spec, stops, kind, nd) {
   if (stops < THIRD_STOP) return null;
-  return manualShort(spec.axis, stops, kind, hasND);
+  return manualShort(spec.axis, stops, kind, nd);
 }
 
 /* ====================================================================== */
@@ -602,6 +672,8 @@ function computeManual(st, evScene, prof, modLoss, d) {
     fLabel: m.f.label, ssLabel: m.ss.label, isoLabel: m.iso.label, ndLabel: d.filters.label,
   };
   if (m.warning) d.warnings.push(m.warning);
+  // 「ND を1枚外す」を提案してよいかの材料。自由軸が明るくなる方向に動ける段数が余地。
+  d.ndRemovable = { filters: st.nd || [], slack: m.ndSlack };
   let powerStops = null;
   if (d.flashOn) {
     // ストロボ側は SS に依存しない。manual の F/ISO と ND・距離だけで決まる。
@@ -629,12 +701,14 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   d.warnings.push(...dp.warnings);
 
   // 同調速度の壁（最重要出力）
-  if (dp.wallStops != null && dp.wallStops > 1 / 3) {
+  // daylightSync 側は wallStops <= THIRD_STOP で経路を組まずに返す。同じ境界を使うこと
+  // （ここだけ緩いと、経路が無いのに壁の数値だけ出る）。
+  if (dp.wallStops != null && dp.wallStops > THIRD_STOP) {
     d.wall = { stops: dp.wallStops, text: `＋${formatStops(dp.wallStops)} 段` };
   }
 
   // アンビエント側カード
-  const ndPathLabel = dp.ndPath ? ndLabelOf(dp.ndPath.filters) : '';
+  const ndPathLabel = dp.ndPath ? ndLabel(dp.ndPath.filters) : '';
   const ambSnap = { f: snap(F, desiredN), ss: snap(SS, camera.syncSpeed), iso: snap(ISO, isoFloorOf(st)) };
   d.ambient = {
     fLabel: ambSnap.f.label, ssLabel: ambSnap.ss.label, isoLabel: ambSnap.iso.label,
@@ -645,6 +719,9 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
   let powerStops = null;
   d.paths = { nd: null, hss: null };
   if (dp.ndPath) {
+    // 外せる ND は「この経路が提案した組み合わせ」。余地は壁を越えるのに要る量を上回る分だけで、
+    // それ以上外すと同調速度の壁が再び開く（ここが袋小路になりやすい）。
+    d.ndRemovable = { filters: dp.ndPath.filters, slack: dp.ndPath.totalStops - dp.wallStops };
     // ND 経路を主案として、発光量モードに応じて発光量 or 距離を解く
     const gnIso = applyIso(applyModifier(gnBase(prof.ws, kFor(prof, st.flash.modifier)), modLoss), isoFloorOf(st));
     const r = resolveFlashSide(st, prof, gnIso, desiredN, dp.ndPath.totalStops, 0, d);
@@ -704,6 +781,9 @@ function computeSlow(st, evScene, prof, modLoss, d) {
     fLabel: ambSnap.f.label, ssLabel: ambSnap.ss.label, isoLabel: ambSnap.iso.label,
     ndLabel: d.filters.label, offset: flash.ambientOffset,
   };
+
+  // 外せる ND は装着中のもの。余地は SS が速くなれる段数（SS が自由に動く軸なので）。
+  d.ndRemovable = { filters: st.nd || [], slack: Math.log2(amb.ssReal / camera.maxSS) };
 
   // ストロボ側（発光量モードに応じて発光量 or 距離を解く。SS には依存しない）
   const gnIso = applyIso(applyModifier(gnBase(prof.ws, kFor(prof, st.flash.modifier)), modLoss), iso);

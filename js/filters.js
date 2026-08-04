@@ -32,6 +32,24 @@ function isBetter(a, b) {
 }
 
 /**
+ * ND 段数 → 表示名（1段=ND2、4段=ND16）。
+ * @param {number} stops 減光段数
+ * @returns {string}
+ */
+export function ndName(stops) { return `ND${2 ** stops}`; }
+
+/**
+ * ND 段数の配列 → 連結ラベル（例 "ND2+ND16"）。表示は薄い順に統一する。
+ * 装着なしは空文字を返す（呼び出し側が「なし」等を選べるように）。
+ * @param {number[]} stopsArr 減光段数の配列
+ * @returns {string}
+ */
+export function ndLabel(stopsArr) {
+  if (!stopsArr || !stopsArr.length) return '';
+  return [...stopsArr].sort((a, b) => a - b).map(ndName).join('+');
+}
+
+/**
  * 所有 ND から必要段数を満たす最良の組み合わせを求める。仕様 §6。
  * @param {number[]} ownedStops 所有 ND の段数（例：[1,2,3,4]）
  * @param {number} required 必要減光段数

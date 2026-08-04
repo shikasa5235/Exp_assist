@@ -313,7 +313,10 @@ function wireManual() {
   // 警告の ? → 該当セクションを開く（イベント委譲。再描画で作り直されるため）
   el.warnings.addEventListener('click', (e) => {
     const b = e.target.closest('[data-help]');
-    if (b) setState({ ui: { manual: b.dataset.help } });
+    if (b) { setState({ ui: { manual: b.dataset.help } }); return; }
+    // 警告内の解決ボタン（いまは発光量の上限を上げる1種類）。再描画で作り直されるので委譲。
+    const a = e.target.closest('[data-action="raiseCeiling"]');
+    if (a) raiseCeiling(Number(a.dataset.to));
   });
   // 目次はページ内リンク。履歴を汚さずスクロールだけする。ジャンプ後もトレイは開いたまま（§0.4）
   el.manualIndex.addEventListener('click', (e) => {
@@ -937,6 +940,19 @@ function updateProfile(i, patch) {
 }
 
 /**
+ * 使用中プロファイルの発光量の上限（強い側）を上げる。警告内のボタンから呼ぶ。
+ * **上限は機材の限界ではなくユーザーの好み**なので、設定タブへ行かずここで変えられるようにする。
+ * @param {number} to 新しい powerCeilingStops（0=1/1 が最強）
+ */
+function raiseCeiling(to) {
+  const i = state.profiles.findIndex((p) => p.id === state.flash.profileId);
+  if (i < 0 || !Number.isFinite(to)) return;
+  const next = clamp(Math.round(to), 0, state.profiles[i].minPowerStops ?? 7);
+  updateProfile(i, { powerCeilingStops: next });
+  toast(`発光量の上限を ${POWER_STEPS[next].label} にしました`);
+}
+
+/**
  * テスト撮影で校正するフォーム（マニュアル §12 の手順）。常時表示。
  * **発光量は 1/1 から 1/128 まで全部選べる。** 校正は「テスト撮影で実際に使った発光量」を
  * 入れるものなので、撮影用チップの制限（閃光時間の理由で 1/1・1/2 を出さない）を適用しない。
@@ -1135,19 +1151,32 @@ function warnHtml(w) {
          <svg class="icon" aria-hidden="true"><use href="#i-help"></use></svg>
        </button>`
     : '';
+  // 設定を直せば解決する警告には、その場で直せるボタンを置く（設定タブへ移動させない）。
+  // action は compute() が組み立てた純粋なデータ。ui は description どおりに描くだけ。
+  const act = w.action
+    ? `<button type="button" class="warn-action" data-action="${w.action.kind}" data-to="${w.action.to}">${w.action.label}</button>`
+    : '';
   return `<div class="warn-item ${w.level}">
     <svg class="icon" aria-hidden="true"><use href="#i-${w.icon}"></use></svg>
-    <span>${w.message}</span>${help}
+    <span>${w.message}</span>${help}${act}
   </div>`;
 }
 
 /* ---- トースト --------------------------------------------------------- */
 let toastTimer = null;
 function toast(msg) {
+  if (!el.toast) return; // init 前に呼ばれても落とさない
   el.toast.textContent = msg; el.toast.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { el.toast.hidden = true; }, 2500);
 }
+
+/**
+ * ui.js の外（main.js の Service Worker 配線）から一時的な通知を出すための入口。
+ * **トーストの DOM を二重に持たないための唯一の公開点。** 状態は変えないので再描画しない。
+ * @param {string} msg 表示する文言
+ */
+export function showToast(msg) { toast(msg); }
 
 /* ---- 小道具（clone / mergeDeep は state.js に集約）------------------- */
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
