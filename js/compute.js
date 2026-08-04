@@ -374,14 +374,26 @@ function resolveFlashSide(st, prof, gnIso, N, ndTotal, hssLossStops, d) {
         // だから「上限を上げる」を第一候補にする。**ここで「ND を1枚外す」は出さない**：
         // ND を外すとアンビエントが明るすぎに戻り、その対処でまた ND を足すことになる（袋小路）。
         const n = formatStops(shortStops);
-        // 必要量を満たす最も弱い上限＝over 以下でいちばん大きい整数段。over ≧ 0 なのでこの
+        // 必要量を満たす最も弱い上限＝**over 以下でいちばん大きい整数段**。over ≧ 0 なのでこの
         // 分岐では必ず存在する（存在しない＝上げても届かない場合は上の over < 0 側に入る）。
-        // over < ceiling ≦ minPower なので floor(over) < ceiling（必ず「上げる」側になる）。
+        //
+        // round ではなく floor である理由：上限は「これより強い側は選ばない」線なので、
+        // over を上回る上限を残すと shortStops = 上限 − over が正のまま警告が消えない。
+        // 例）over 0.6 で上限 1（1/2）にしても 0.4段 足りない → 上限は 0（1/1）まで開ける必要がある。
+        //
         // 範囲外の添字で POWER_STEPS[to] が undefined になるのを防ぐため念のためクランプする。
         const to = Math.max(0, Math.min(minPower, Math.floor(over + 1e-9)));
-        const action = { kind: 'raiseCeiling', to, label: `上限を ${POWER_STEPS[to].label} に上げる` };
+        // **上限と、その上限で実際に使われる発光量は一致しない。** 発光量は round(over) なので
+        // 上限より1段弱いことがある（over 0.6 → 上限 1/1・発光量 1/2）。文言に両方出さないと
+        // 「1/1 に上げると言われたのに 1/2 になった」と読めてしまう（実機で報告された混乱）。
+        // 計算は resolvePowerWithCeiling と同じ式を使うこと（ずれると表示だけが嘘になる）。
+        const resultPower = Math.max(to, Math.min(minPower, Math.round(over)));
+        const action = {
+          kind: 'raiseCeiling', to, resultPowerStops: resultPower,
+          label: `上限を ${POWER_STEPS[to].label} に上げる`,
+        };
         const remedies = [
-          `${action.label}（この設定で撮れます）`,
+          `${action.label}（発光量 ${POWER_STEPS[resultPower].label} で撮れます）`,
           `距離を ${dTxt}m まで詰める`,
           `ISO を ${n}段上げる`,
         ];

@@ -103,7 +103,16 @@
       const s = snap(ISO, iso);
       return { expected: 'ISO400', actual: `${s.label} (${iso.toFixed(1)})`, pass: s.label === '400' && rel(iso, 400) };
     });
-    add('5b', 'EV12 / F4 / SS1/60 → 連続25.0→下限50クランプ+明るすぎ警告', () => {
+    // ---- isoFloorWarning は「いまアプリから呼ばれていない」関数である（意図的）----
+    // 意図別ロジックは ISO を下限から上げる方向にしか動かさないので、ISO が下限を割る経路が
+    // compute には無い（明るすぎ分は SS 側に出て overBrightWarning が拾う）。そのため
+    // compute.js の import は外してあり、この関数を呼ぶのは #5b と #33 だけ。
+    //
+    // **消さずに残しているのは、将来「ISO優先」の意図を追加したときに使うため。**
+    // 仕様 §9 が定義する警告で、計算自体は正しい。テストを残すことで
+    // 「使っていないから壊れていても気づかない」状態を防いでいる。
+    // 逆に、compute に ISO を下げる経路を足したときはここを呼び出し側の検証に格上げすること。
+    add('5b', 'EV12 / F4 / SS1/60 → 連続25.0→下限50クランプ+明るすぎ警告（アプリ未使用の関数・上記コメント参照）', () => {
       const iso = solveISO(12, F.real(12), SS.real(18)); // = 25.0
       const s = snap(ISO, iso);
       const w = isoFloorWarning(iso, 50);
@@ -751,13 +760,46 @@
       const w = d.warnings.find((x) => x.helpId === HELP.powerCeiling);
       // action.to が新しい上限。ここまで上げれば shortStops = max(0, 上限 − over) が 0 になる
       const over = d.flash.over;
-      const firstIsRaise = !!w && /足りません。上限を .+ に上げる（この設定で撮れます）／/.test(w.message);
+      const firstIsRaise = !!w && /足りません。上限を .+ に上げる（発光量 .+ で撮れます）／/.test(w.message);
       const satisfies = !!w && w.action && w.action.kind === 'raiseCeiling'
         && Math.max(0, w.action.to - over) < 1e-9;
       return {
         expected: '第一候補が「上限を◯に上げる」／その上限で不足0段',
         actual: w ? `${w.action ? `to=${POWER_STEPS[w.action.to].label} (over=${over.toFixed(2)})` : 'action なし'} / ${w.message}` : '警告なし',
         pass: firstIsRaise && satisfies,
+      };
+    });
+    add('W7', '上限超過：文言のラベルと action が設定する値が一致し、発光量も文言どおり', () => {
+      // 実機で「1/1 に上げると出たのに 1/2 になった」という報告が出た組み合わせを固定する。
+      // over の端数が 0.5 以上だと上限（floor）と発光量（round）が1段ずれるので、
+      // その状態を作って文言・action・結果の3つが噛み合うことを確かめる。
+      //   gnFull = 4.0·√100·√(200/100)/2^(4/2) = 14.142、N = F5.6(実体 5.657)
+      //   over = 2·log2(14.142/(5.657·d)) を 0.6 にする d = 2.5/2^0.3 = 2.031m
+      const base = deadEndState();
+      const st = { ...base, flash: { ...base.flash, distance: 2.5 / 2 ** 0.3 } };
+      const d = compute(st);
+      const w = d.warnings.find((x) => x.helpId === HELP.powerCeiling);
+      if (!w || !w.action) {
+        return { expected: '上限超過の警告＋action', actual: w ? 'action なし' : '警告なし', pass: false };
+      }
+      const a = w.action;
+      // 1) 文言に出るラベルは POWER_STEPS[a.to] と同一か（data-to はこの to をそのまま使う）
+      const labelInMsg = `上限を ${POWER_STEPS[a.to].label} に上げる`;
+      const labelMatches = w.message.includes(labelInMsg) && a.label === labelInMsg;
+      // 2) 文言の「発光量 ◯ で撮れます」が a.resultPowerStops と一致するか
+      const powerMatches = w.message.includes(`（発光量 ${POWER_STEPS[a.resultPowerStops].label} で撮れます）`);
+      // 3) 実際に上限を a.to にしたら警告が消え、発光量が予告どおりになるか（ボタンの再現）
+      const after = compute({ ...st, profiles: st.profiles.map((p) => ({ ...p, powerCeilingStops: a.to })) });
+      const gone = !after.warnings.some((x) => x.helpId === HELP.powerCeiling);
+      const asPromised = after.flash.powerLabel === POWER_STEPS[a.resultPowerStops].label;
+      // ずれが起きる組み合わせ（上限 ≠ 発光量）を実際に踏んでいることも示す
+      const isTheTrickyCase = a.to !== a.resultPowerStops;
+      return {
+        expected: `上限=発光量ではない例で 文言=action=結果（over 端数 ≧ 0.5）`,
+        actual: `上限 ${POWER_STEPS[a.to].label} / 予告 ${POWER_STEPS[a.resultPowerStops].label}`
+          + ` / 実際 ${after.flash.powerLabel} / 警告${gone ? '消えた' : '残った'}`
+          + ` / ずれる例=${isTheTrickyCase} / ${w.message}`,
+        pass: labelMatches && powerMatches && gone && asPromised && isTheTrickyCase,
       };
     });
 
