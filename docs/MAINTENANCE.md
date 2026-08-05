@@ -69,7 +69,7 @@
 │   └─ check-help-anchors    helpId と本文アンカーが index.html に実在するか（§7・§8）
 ├─ .nojekyll                 GitHub Pages の Jekyll 処理を止める
 ├─ icons/                    PWA アイコン 4種（png）＋ 生成元の svg 2種
-└─ docs/                     仕様書・マニュアル・この保守文書 ＋ 作業報告（report-*.md）
+└─ docs/                     仕様書・マニュアル・この保守文書
 ```
 
 **`advisor.js` と `compute.js` の境界：** 意図別ロジック（ぼかす／止める／風景／夜手持ち）と
@@ -483,7 +483,11 @@ bash tools/check-help-anchors
 ```
 
 **`helpId` は必須。** 全ての警告がマニュアルのセクションを1つ持つ（「この設定で撮れます」も含む）。
-**ID 文字列の定義場所は `js/scenes.js` の `HELP` だけ。** 実装に直書きしない。
+**ID 文字列の定義場所は `js/scenes.js` だけ。** 実装に直書きしない。
+
+> **`HELP` と `HELP_LINKS` を分けている理由：** テスト #33 は「`HELP` の全値がいずれかの警告から
+> 発生する」ことを検証する。バッジのように**警告ではない導線**の helpId を `HELP` に足すと
+> #33 が永久に赤くなる。そちらは `HELP_LINKS` に置く（現在は未校正バッジ→§12 校正の1件のみ）。
 対応表は `docs/exposure-app-manual.md` §0.5 にあり、**実装が正典**（表を実装に合わせる）。
 
 ### 警告を追加するとき

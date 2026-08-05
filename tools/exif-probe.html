@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>EXIF probe — 露出アシスト フェーズ0 検証</title>
+<!--
+  使い捨ての検証ページ（docs/exposure-app-photocal-spec.md §9.1 フェーズ0）。
+
+  目的：iOS の写真アプリ経由でファイルを選んだとき EXIF が保持されるか（§6.4 の未知）を
+  実機で確かめる。機能A（スマホ露出計）と機能B（校正の入力補完）の両方がここに依存する。
+
+  このファイルは配布対象外。
+    - sw.js の ASSETS に入れない（tools/ は check-sw-assets の除外リストにある）
+    - js/ のモジュールを一切 import しない（使い捨てなので依存を作らない）
+    - 外部リソース参照ゼロ（CLAUDE.md の不変条件はここでも守る）
+
+  GPS タグ（0x8825）は**存在の有無だけ**を見る。ポインタを追わず、中身を読まない（§6.5）。
+-->
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #1a1a1a; --sub: #666; --line: #d4d4d4;
+    --ok: #0a7a3d; --ng: #b3261e; --card: #f6f6f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141414; --fg: #ececec; --sub: #9a9a9a; --line: #3a3a3a;
+            --ok: #6ede9a; --ng: #ff8a80; --card: #1f1f1f; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px calc(16px + env(safe-area-inset-right)) 48px calc(16px + env(safe-area-inset-left));
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.lead { margin: 0 0 16px; color: var(--sub); font-size: 14px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+  /* 44px 以上・font-size 16px 以上（iOS の自動ズーム回避）。本体アプリの規則に合わせる */
+  input[type=file], button {
+    font: inherit; min-height: 44px; padding: 10px 14px;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--card); color: var(--fg);
+  }
+  button { cursor: pointer; }
+  pre {
+    margin: 0; padding: 12px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 10px;
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-all; overflow-x: auto;
+  }
+  .ok { color: var(--ok); }
+  .ng { color: var(--ng); }
+  footer { margin-top: 20px; font-size: 13px; color: var(--sub); }
+</style>
+</head>
+<body>
+
+<h1>EXIF probe</h1>
+<p class="lead">
+  写真を選ぶと、読めたものを全部そのまま出します。端末内で読むだけで、どこにも送信しません。
+  位置情報（GPS）は存在の有無だけを見て、中身は読みません。
+</p>
+
+<div class="row">
+  <!-- accept を指定しない：HEIC / RAW / PNG も含めて「何が渡されるか」を見るため -->
+  <input type="file" id="pick">
+  <button type="button" id="copy">結果をコピー</button>
+</div>
+
+<pre id="out">（ファイルを選んでください）</pre>
+
+<footer>
+  検算：F16 / 1/125 / ISO100 → 下の「起動時セルフテスト」に出ます。<br>
+  docs/exposure-app-photocal-spec.md §9.1 の経路1〜6 を順に試してください。
+</footer>
+
+<script>
+'use strict';
+
+// ───────────────────────────────────────── 出力ヘルパ
+const out = document.getElementById('out');
+let lines = [];
+const W = (s) => { lines.push(s === undefined ? '' : String(s)); };
+const H = (s) => { W(''); W('── ' + s + ' ' + '─'.repeat(Math.max(0, 46 - s.length))); };
+const flush = () => { out.textContent = lines.join('\n'); };
+
+/** 進捗ログ。パースが途中で落ちても「どこまで進めたか」が残る */
+const steps = [];
+const step = (label, okFlag, detail) => {
+  steps.push((okFlag ? '[ok] ' : '[--] ') + label + (detail ? '  ' + detail : ''));
+};
+
+const hx = (n, w) => (n >>> 0).toString(16).toUpperCase().padStart(w, '0');
+const tag16 = (t) => '0x' + hx(t, 4);
+const f2 = (v) => (Number.isFinite(v) ? v.toFixed(2) : String(v));
+
+// ───────────────────────────────────────── EV（機能A の中核の式）
+/**
+ * EV(ISO100基準) = log2(N² / t) − log2(S / 100)
+ * @param {number} N F値  @param {number} t 露光時間（秒）  @param {number} S ISO
+ * @returns {number|null} 計算できなければ null（ゼロ除算を起こさない）
+ */
+function evFromExposure(N, t, S) {
+  if (!(N > 0) || !(t > 0) || !(S > 0)) return null;
+  return Math.log2((N * N) / t) - Math.log2(S / 100);
+}
+
+// ───────────────────────────────────────── 16進ダンプ
+function hexDump(u8, n) {
+  const len = Math.min(n, u8.length);
+  const parts = [];
+  for (let i = 0; i < len; i += 16) {
+    const chunk = Array.from(u8.subarray(i, Math.min(i + 16, len)));
+    const h = chunk.map((b) => hx(b, 2)).join(' ').padEnd(16 * 3 - 1, ' ');
+    const a = chunk.map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '.')).join('');
+    parts.push(hx(i, 4) + '  ' + h + '  |' + a + '|');
+  }
+  return parts.join('\n');
+}
+
+const ascii = (u8, o, n) => {
+  let s = '';
+  for (let i = 0; i < n && o + i < u8.length; i++) {
+    const b = u8[o + i];
+    s += (b >= 0x20 && b < 0x7f) ? String.fromCharCode(b) : '.';
+  }
+  return s;
+};
+
+// ───────────────────────────────────────── 形式判定
+function detectFormat(u8) {
+  if (u8.length >= 3 && u8[0] === 0xFF && u8[1] === 0xD8 && u8[2] === 0xFF) return 'jpeg';
+  if (u8.length >= 8 && u8[0] === 0x89 && ascii(u8, 1, 3) === 'PNG') return 'png';
+  if (u8.length >= 12 && ascii(u8, 4, 4) === 'ftyp') return 'bmff';   // HEIC / HEIF / MP4 系
+  if (u8.length >= 4 && (ascii(u8, 0, 2) === 'II' || ascii(u8, 0, 2) === 'MM')) return 'tiff';
+  return 'unknown';
+}
+
+// ───────────────────────────────────────── JPEG セグメント走査
+/**
+ * SOI から SOS までのマーカーセグメントを列挙する。
+ * @returns {{segs: Array, note: string}}
+ */
+function scanJpegSegments(u8) {
+  const segs = [];
+  let p = 2;                       // FF D8 の直後
+  let note = 'SOS まで到達';
+  while (p + 1 < u8.length) {
+    if (u8[p] !== 0xFF) { note = 'マーカー同期を失った（offset ' + p + ' が 0xFF でない）'; break; }
+    let m = u8[p + 1];
+    while (m === 0xFF && p + 2 < u8.length) { p++; m = u8[p + 1]; }   // フィルバイト
+    if (m === 0xD8 || (m >= 0xD0 && m <= 0xD9)) { p += 2; continue; } // 長さを持たない
+    if (p + 3 >= u8.length) { note = '長さフィールドの手前でファイルが終わった'; break; }
+    const len = (u8[p + 2] << 8) | u8[p + 3];
+    segs.push({ marker: m, offset: p, len: len, dataOffset: p + 4, dataLen: len - 2 });
+    if (m === 0xDA) { note = 'SOS（0xFFDA）に到達。以降は圧縮データ'; break; }
+    p += 2 + len;
+  }
+  return { segs: segs, note: note };
+}
+
+const markerName = (m) => {
+  if (m >= 0xE0 && m <= 0xEF) return 'APP' + (m - 0xE0);
+  const names = { 0xC0: 'SOF0', 0xC2: 'SOF2', 0xC4: 'DHT', 0xDB: 'DQT', 0xDD: 'DRI',
+                  0xDA: 'SOS', 0xFE: 'COM' };
+  return names[m] || '?';
+};
+
+// ───────────────────────────────────────── TIFF / IFD
+const TYPE_NAME = { 1: 'BYTE', 2: 'ASCII', 3: 'SHORT', 4: 'LONG', 5: 'RATIONAL',
+                    6: 'SBYTE', 7: 'UNDEFINED', 8: 'SSHORT', 9: 'SLONG',
+                    10: 'SRATIONAL', 11: 'FLOAT', 12: 'DOUBLE' };
+const TYPE_SIZE = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8 };
+
+const TAG_IFD_POINTER = 0x8769;   // ExifIFD へのポインタ
+const TAG_GPS_POINTER = 0x8825;   // GPS IFD。**追わない**（§6.5）
+
+/** 1エントリを読む。値は生のまま（数値/文字列/有理数の配列）を返す */
+function readEntry(dv, u8, tiffStart, entryOffset, little) {
+  const tag = dv.getUint16(entryOffset, little);
+  const type = dv.getUint16(entryOffset + 2, little);
+  const count = dv.getUint32(entryOffset + 4, little);
+  const size = TYPE_SIZE[type];
+  const e = { tag: tag, type: type, count: count, inline: false, value: null,
+              raw: null, error: null };
+  if (!size) { e.error = '未知の型 ' + type; return e; }
+  const total = size * count;
+  if (total > 0x7fffffff) { e.error = 'count が異常（' + count + '）'; return e; }
+  let vo = entryOffset + 8;
+  if (total <= 4) { e.inline = true; } else {
+    vo = tiffStart + dv.getUint32(entryOffset + 8, little);
+  }
+  e.valueOffset = vo;
+  if (vo < 0 || vo + total > u8.length) { e.error = '値が範囲外（offset ' + vo + ' len ' + total + '）'; return e; }
+
+  try {
+    if (type === 2) {                                   // ASCII
+      let s = '';
+      for (let i = 0; i < count; i++) {
+        const b = u8[vo + i];
+        if (b === 0) break;
+        s += String.fromCharCode(b);
+      }
+      e.value = s; e.raw = JSON.stringify(s);
+    } else if (type === 5 || type === 10) {             // RATIONAL
+      const nums = [], reals = [];
+      for (let i = 0; i < count; i++) {
+        const n = type === 5 ? dv.getUint32(vo + i * 8, little) : dv.getInt32(vo + i * 8, little);
+        const d = type === 5 ? dv.getUint32(vo + i * 8 + 4, little) : dv.getInt32(vo + i * 8 + 4, little);
+        nums.push(n + '/' + d);
+        reals.push(d === 0 ? NaN : n / d);              // 分母0でも例外にしない
+      }
+      e.value = reals.length === 1 ? reals[0] : reals;
+      e.raw = nums.join(', ') + '  (= ' + reals.map((v) => (Number.isFinite(v) ? String(v) : 'NaN')).join(', ') + ')';
+    } else if (type === 3 || type === 4 || type === 8 || type === 9) {
+      const vs = [];
+      for (let i = 0; i < count; i++) {
+        const o = vo + i * size;
+        vs.push(type === 3 ? dv.getUint16(o, little)
+              : type === 4 ? dv.getUint32(o, little)
+              : type === 8 ? dv.getInt16(o, little)
+              : dv.getInt32(o, little));
+      }
+      e.value = vs.length === 1 ? vs[0] : vs;
+      e.raw = vs.join(', ');
+    } else {                                            // BYTE / UNDEFINED / FLOAT ほか
+      const show = Math.min(count, 16);
+      const bs = [];
+      for (let i = 0; i < show; i++) bs.push(hx(u8[vo + i], 2));
+      e.raw = bs.join(' ') + (count > show ? ' …(' + count + 'バイト)' : '');
+    }
+  } catch (err) {
+    e.error = '読み取り中に例外: ' + err.message;
+  }
+  return e;
+}
+
+/** IFD を1つ読む。@returns {{entries: Array, next: number, error: string|null}} */
+function readIfd(dv, u8, tiffStart, ifdOffset, little) {
+  const at = tiffStart + ifdOffset;
+  if (at + 2 > u8.length) return { entries: [], next: 0, error: 'IFD の先頭が範囲外（' + at + '）' };
+  const n = dv.getUint16(at, little);
+  if (n > 512) return { entries: [], next: 0, error: 'エントリ数が異常（' + n + '）' };
+  if (at + 2 + n * 12 + 4 > u8.length) {
+    return { entries: [], next: 0, error: 'エントリ列が範囲外（' + n + '件）' };
+  }
+  const entries = [];
+  for (let i = 0; i < n; i++) entries.push(readEntry(dv, u8, tiffStart, at + 2 + i * 12, little));
+  return { entries: entries, next: dv.getUint32(at + 2 + n * 12, little), error: null };
+}
+
+// ───────────────────────────────────────── BMFF（HEIC）
+/** トップレベルのボックスを列挙する。ネストは meta の中だけ1段見る */
+function scanBoxes(dv, u8, start, end, depth) {
+  const boxes = [];
+  let p = start;
+  let guard = 0;
+  while (p + 8 <= end && guard++ < 256) {
+    let size = dv.getUint32(p, false);
+    const type = ascii(u8, p + 4, 4);
+    let head = 8;
+    if (size === 1) {                                   // 64bit largesize
+      if (p + 16 > end) break;
+      const hi = dv.getUint32(p + 8, false), lo = dv.getUint32(p + 12, false);
+      size = hi * 4294967296 + lo;
+      head = 16;
+    } else if (size === 0) {
+      size = end - p;                                   // 最後のボックス
+    }
+    if (size < head || p + size > end) {
+      boxes.push({ type: type, offset: p, size: size, bad: true, depth: depth });
+      break;
+    }
+    const box = { type: type, offset: p, size: size, head: head, depth: depth, bad: false };
+    boxes.push(box);
+    if (type === 'meta') {
+      // meta は FullBox（version 1 + flags 3 = 4バイト）を持つ
+      box.children = scanBoxes(dv, u8, p + head + 4, p + size, depth + 1);
+    }
+    p += size;
+  }
+  return boxes;
+}
+
+const flatBoxes = (bs) => bs.reduce((a, b) => a.concat([b], b.children ? flatBoxes(b.children) : []), []);
+
+// ───────────────────────────────────────── 読み込み
+/**
+ * File → ArrayBuffer。`File.arrayBuffer()` は Safari 14 以降なので、
+ * 古い iOS でも進めるよう FileReader に落ちる。
+ * @returns {Promise<ArrayBuffer>}
+ */
+function readBuffer(file) {
+  if (typeof file.arrayBuffer === 'function') return file.arrayBuffer();
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(fr.error || new Error('FileReader が失敗しました'));
+    fr.readAsArrayBuffer(file);
+  });
+}
+
+// ───────────────────────────────────────── 本体
+async function probe(file) {
+  lines = [];
+  steps.length = 0;
+
+  H('File');
+  W('name : ' + file.name);
+  W('type : ' + (file.type === '' ? '（空文字。iOS の HEIC ではしばしば空）' : file.type));
+  W('size : ' + file.size + ' バイト');
+  W('lastModified : ' + new Date(file.lastModified).toISOString());
+
+  let buf;
+  try {
+    buf = await readBuffer(file);
+    step('ArrayBuffer 読み込み', true, buf.byteLength + ' バイト');
+  } catch (err) {
+    step('ArrayBuffer 読み込み', false, err.message);
+    H('進捗'); W(steps.join('\n'));
+    flush();
+    return;
+  }
+
+  const u8 = new Uint8Array(buf);
+  const dv = new DataView(buf);
+
+  H('先頭32バイト');
+  W(hexDump(u8, 32));
+
+  const fmt = detectFormat(u8);
+  step('形式判定', true, fmt);
+  H('形式');
+  W('detectFormat() → ' + fmt);
+
+  // 露出3値。JPEG / TIFF 経路で埋まる
+  const ex = { fNumber: null, exposureTime: null, iso: null, isoFrom: null };
+
+  // ─── JPEG
+  if (fmt === 'jpeg') {
+    try {
+      const { segs, note } = scanJpegSegments(u8);
+      step('JPEG セグメント走査', true, segs.length + '件 / ' + note);
+      H('JPEG セグメント');
+      W('走査の終わり方: ' + note);
+      segs.forEach((s) => {
+        let extra = '';
+        if (s.marker >= 0xE0 && s.marker <= 0xEF) extra = '  id="' + ascii(u8, s.dataOffset, Math.min(20, s.dataLen)) + '"';
+        W('0xFF' + hx(s.marker, 2) + ' ' + markerName(s.marker).padEnd(5) +
+          ' offset=' + s.offset + ' 長さ=' + s.len + ' データ=' + s.dataOffset + '..' + (s.dataOffset + s.dataLen - 1) + extra);
+      });
+
+      const app1s = segs.filter((s) => s.marker === 0xE1);
+      H('APP1');
+      if (!app1s.length) {
+        W('APP1 が見つかりません → EXIF なし');
+        step('APP1 の発見', false, '0件');
+      } else {
+        app1s.forEach((s) => {
+          const sig = ascii(u8, s.dataOffset, 6);
+          W('APP1 offset=' + s.offset + ' 長さ=' + s.len + ' 先頭6バイト="' + sig + '" (' +
+            Array.from(u8.subarray(s.dataOffset, s.dataOffset + 6)).map((b) => hx(b, 2)).join(' ') + ')');
+        });
+        const exifSeg = app1s.find((s) =>
+          u8[s.dataOffset] === 0x45 && u8[s.dataOffset + 1] === 0x78 && u8[s.dataOffset + 2] === 0x69 &&
+          u8[s.dataOffset + 3] === 0x66 && u8[s.dataOffset + 4] === 0x00 && u8[s.dataOffset + 5] === 0x00);
+        W('"Exif\\0\\0" を含む APP1: ' + (exifSeg ? 'あり（offset ' + exifSeg.offset + '）' : 'なし'));
+        step('APP1 の発見', true, app1s.length + '件');
+        step('"Exif\\0\\0" 署名', !!exifSeg, exifSeg ? 'offset ' + exifSeg.offset : '見つからず');
+
+        if (exifSeg) dumpTiff(dv, u8, exifSeg.dataOffset + 6, ex);
+      }
+    } catch (err) {
+      step('JPEG 解析', false, err.name + ': ' + err.message);
+      H('JPEG 解析の例外'); W(String(err && err.stack || err));
+    }
+  }
+
+  // ─── 生の TIFF（RAW の一部・EXIF 断片）
+  if (fmt === 'tiff') {
+    try { dumpTiff(dv, u8, 0, ex); }
+    catch (err) { step('TIFF 解析', false, err.message); }
+  }
+
+  // ─── BMFF / HEIC
+  if (fmt === 'bmff') {
+    try {
+      H('BMFF（HEIC / HEIF / MP4 系）');
+      const major = ascii(u8, 8, 4);
+      const minor = dv.getUint32(12, false);
+      W('ftyp major brand : "' + major + '"');
+      W('ftyp minor version: ' + minor);
+      const ftypSize = dv.getUint32(0, false);
+      const compat = [];
+      for (let o = 16; o + 4 <= Math.min(ftypSize, u8.length); o += 4) compat.push(ascii(u8, o, 4));
+      W('compatible brands : ' + (compat.length ? compat.map((c) => '"' + c + '"').join(' ') : '（なし）'));
+      const heicish = ['heic', 'heix', 'heim', 'heis', 'hevc', 'mif1', 'msf1'];
+      W('HEIC 系のブランドか: ' + (heicish.indexOf(major) >= 0 || compat.some((c) => heicish.indexOf(c) >= 0) ? 'はい' : 'いいえ'));
+      step('ftyp', true, 'major="' + major + '"');
+
+      const boxes = scanBoxes(dv, u8, 0, u8.length, 0);
+      const flat = flatBoxes(boxes);
+      W('');
+      W('トップレベル〜meta 直下のボックス:');
+      flat.forEach((b) => {
+        W('  '.repeat(b.depth + 1) + '"' + b.type + '" offset=' + b.offset + ' size=' + b.size + (b.bad ? '  ← size が不正' : ''));
+      });
+      const has = (t) => flat.some((b) => b.type === t);
+      W('');
+      ['meta', 'iinf', 'iloc', 'iprp', 'idat', 'mdat'].forEach((t) => {
+        W(t.padEnd(5) + ' : ' + (has(t) ? 'あり' : 'なし'));
+      });
+      step('meta / iinf / iloc', has('meta') && has('iinf') && has('iloc'),
+        'meta=' + has('meta') + ' iinf=' + has('iinf') + ' iloc=' + has('iloc'));
+      W('');
+      W('※ HEIC の EXIF 抽出（iinf の "Exif" アイテムを iloc で辿る）はフェーズ2。');
+      W('　 いまは検出して「設定 → カメラ → フォーマット → 互換性優先」を案内する方針（§6.2）。');
+    } catch (err) {
+      step('BMFF 解析', false, err.name + ': ' + err.message);
+      H('BMFF 解析の例外'); W(String(err && err.stack || err));
+    }
+  }
+
+  if (fmt === 'png') {
+    H('PNG');
+    W('PNG は通常 EXIF を持ちません（機能A には使えません）。');
+    step('PNG', true, 'EXIF なしとして扱う');
+  }
+
+  if (fmt === 'unknown') {
+    H('未知の形式');
+    W('先頭バイトが JPEG / PNG / BMFF / TIFF のいずれにも一致しません。RAW の可能性があります（対象外・§6.3）。');
+  }
+
+  // ─── EV
+  H('EV の計算（機能A の中核）');
+  W('EV(ISO100基準) = log2(N² / t) − log2(S / 100)');
+  W('');
+  W('N (FNumber)     : ' + (ex.fNumber === null ? '取れませんでした' : ex.fNumber));
+  W('t (ExposureTime): ' + (ex.exposureTime === null ? '取れませんでした' : ex.exposureTime + ' 秒'));
+  W('S (ISO)         : ' + (ex.iso === null ? '取れませんでした' : ex.iso + (ex.isoFrom ? '（' + ex.isoFrom + ' から）' : '')));
+  const ev = evFromExposure(ex.fNumber, ex.exposureTime, ex.iso);
+  if (ev === null) {
+    W('');
+    W('→ EV は計算できません（3値のいずれかが欠損またはゼロ）');
+    step('EV の計算', false, '3値が揃わない');
+  } else {
+    W('');
+    W('log2(N² / t)    = ' + f2(Math.log2((ex.fNumber * ex.fNumber) / ex.exposureTime)));
+    W('log2(S / 100)   = ' + f2(Math.log2(ex.iso / 100)));
+    W('EV              = ' + ev.toFixed(3) + '   （小数2桁: ' + f2(ev) + '）');
+    // ナイトモードの疑い（§3.4）。ここでは判定を出すだけ
+    if (ex.exposureTime >= 1 && ex.iso >= 3200) W('※ SS 1秒以上 かつ ISO3200 以上 → ナイトモードの疑い');
+    step('EV の計算', true, 'EV ' + f2(ev));
+  }
+
+  H('進捗（どこまで進めたか）');
+  W(steps.join('\n'));
+
+  H('起動時セルフテスト');
+  W(selfTest());
+
+  flush();
+}
+
+/**
+ * APP1 内（または生 TIFF の先頭）から IFD0 / ExifIFD を読んで出力する。
+ * @param {number} tiffStart TIFF ヘッダの絶対オフセット
+ * @param {object} ex 露出3値を書き込む先
+ */
+function dumpTiff(dv, u8, tiffStart, ex) {
+  H('TIFF ヘッダ');
+  const bo = ascii(u8, tiffStart, 2);
+  const little = bo === 'II';
+  W('offset      : ' + tiffStart);
+  W('バイトオーダー: "' + bo + '" → ' + (little ? 'リトルエンディアン' : bo === 'MM' ? 'ビッグエンディアン' : '不正'));
+  if (bo !== 'II' && bo !== 'MM') {
+    step('TIFF ヘッダ', false, 'バイトオーダーが "' + bo + '"');
+    return;
+  }
+  const magic = dv.getUint16(tiffStart + 2, little);
+  W('magic (42)   : ' + magic + (magic === 42 ? '' : '  ← 42 でない'));
+  const ifd0 = dv.getUint32(tiffStart + 4, little);
+  W('IFD0 offset  : ' + ifd0);
+  step('TIFF ヘッダ', magic === 42, bo + ' / magic ' + magic);
+
+  const r0 = readIfd(dv, u8, tiffStart, ifd0, little);
+  H('IFD0');
+  if (r0.error) { W('読めません: ' + r0.error); step('IFD0', false, r0.error); }
+  else {
+    W('タグ番号（' + r0.entries.length + '件）: ' + r0.entries.map((e) => tag16(e.tag)).join(' '));
+    dumpEntries(r0.entries);
+    step('IFD0', true, r0.entries.length + '件');
+  }
+
+  const exifPtr = r0.entries.find((e) => e.tag === TAG_IFD_POINTER);
+  const gpsPtr = r0.entries.find((e) => e.tag === TAG_GPS_POINTER);
+
+  let rE = { entries: [], error: 'ExifIFD へのポインタ（0x8769）がありません' };
+  H('ExifIFD');
+  if (exifPtr && Number.isFinite(exifPtr.value)) {
+    rE = readIfd(dv, u8, tiffStart, exifPtr.value, little);
+    if (rE.error) { W('読めません: ' + rE.error); step('ExifIFD', false, rE.error); }
+    else {
+      W('offset: ' + exifPtr.value);
+      W('タグ番号（' + rE.entries.length + '件）: ' + rE.entries.map((e) => tag16(e.tag)).join(' '));
+      dumpEntries(rE.entries);
+      step('ExifIFD', true, rE.entries.length + '件');
+    }
+  } else {
+    W(rE.error);
+    step('ExifIFD', false, 'ポインタなし');
+  }
+
+  // GPS：**存在の有無だけ。ポインタを追わない**（docs/exposure-app-photocal-spec.md §6.5）
+  H('GPS（0x8825）');
+  W(gpsPtr ? 'タグが存在しました。中身は読みません（仕様 §6.5）。' : 'タグはありませんでした。');
+  step('GPS の扱い', true, gpsPtr ? '存在。読まない' : '不在');
+
+  // ─── 主要タグ
+  const all = r0.entries.concat(rE.entries);
+  const pick = (t) => all.find((e) => e.tag === t);
+  const MAIN = [
+    [0x829D, 'FNumber', 'ExifIFD'],
+    [0x829A, 'ExposureTime', 'ExifIFD'],
+    [0x8827, 'ISOSpeedRatings', 'ExifIFD'],
+    [0x920A, 'FocalLength', 'ExifIFD'],
+    [0x9209, 'Flash', 'ExifIFD'],
+    [0x010F, 'Make', 'IFD0'],
+    [0x0110, 'Model', 'IFD0'],
+    [0x9003, 'DateTimeOriginal', 'ExifIFD'],
+  ];
+  H('主要タグの生の値');
+  MAIN.forEach(([t, name, where]) => {
+    const e = pick(t);
+    if (!e) { W(tag16(t) + ' ' + name.padEnd(17) + ' : （' + where + ' に無し）'); return; }
+    W(tag16(t) + ' ' + name.padEnd(17) + ' : ' + (e.error ? '読めません（' + e.error + '）' : e.raw) +
+      '   [type=' + (TYPE_NAME[e.type] || e.type) + ' count=' + e.count + (e.inline ? ' inline' : ' @' + e.valueOffset) + ']');
+  });
+  // 0x8827 が無い機種のための候補（参考。EV に使ったときは下に明記する）
+  H('ISO の代替候補（参考）');
+  [[0x8832, 'RecommendedExposureIndex'], [0x8833, 'ISOSpeed'], [0x8834, 'ISOSpeedLatitudeyyy']].forEach(([t, name]) => {
+    const e = pick(t);
+    W(tag16(t) + ' ' + name.padEnd(25) + ' : ' + (e ? (e.error ? '読めません' : e.raw) : '（無し）'));
+  });
+
+  // ─── 露出3値の抽出
+  const num = (e) => {
+    if (!e || e.error) return null;
+    const v = Array.isArray(e.value) ? e.value[0] : e.value;
+    return Number.isFinite(v) ? v : null;
+  };
+  ex.fNumber = num(pick(0x829D));
+  ex.exposureTime = num(pick(0x829A));
+  ex.iso = num(pick(0x8827));
+  ex.isoFrom = ex.iso === null ? null : '0x8827';
+  if (ex.iso === null) {
+    for (const t of [0x8833, 0x8832]) {
+      const v = num(pick(t));
+      if (v !== null) { ex.iso = v; ex.isoFrom = tag16(t) + ' の代替'; break; }
+    }
+  }
+}
+
+function dumpEntries(entries) {
+  entries.forEach((e) => {
+    // GPS ポインタの中身は追わない。ポインタ値そのものは構造情報なので出す
+    W('  ' + tag16(e.tag) + ' type=' + (TYPE_NAME[e.type] || e.type).padEnd(10) +
+      ' count=' + String(e.count).padEnd(5) + ' → ' +
+      (e.error ? '（' + e.error + '）' : e.raw));
+  });
+}
+
+// ───────────────────────────────────────── セルフテスト（サニー16の検算）
+function selfTest() {
+  const evLabel = evFromExposure(16, 1 / 125, 100);       // EXIF に入る公称値そのまま
+  const evExact = evFromExposure(16, 1 / 128, 100);       // 1/3段グリッド上の厳密値
+  const l = [];
+  l.push('サニー16 の検算');
+  l.push('  F16 / 1/125 / ISO100  → EV = ' + evLabel.toFixed(4) + '  （1/3段に丸めると 15.0）');
+  l.push('  F16 / 1/128 / ISO100  → EV = ' + evExact.toFixed(4) + '  （厳密値。1/125 は 1/128 の公称ラベル）');
+  l.push('  差 = ' + (evExact - evLabel).toFixed(4) + '段');
+  l.push('');
+  l.push('  EXIF の ExposureTime は公称ラベル（1/125）で入るため、素の式では 15.0 に');
+  l.push('  ちょうど乗らない。フェーズ1 では compute() 入口の exactGear() と同じ扱いが必要');
+  l.push('  （CLAUDE.md「公称ラベルを厳密値として使わない」／MAINTENANCE.md §4）。');
+  l.push('');
+  l.push('その他の検算');
+  l.push('  F1.8 / 1/1600 / ISO40 → EV = ' + evFromExposure(1.8, 1 / 1600, 40).toFixed(4) + '  （仕様 §3.1 の例: 13.66）');
+  l.push('  t = 0（ゼロ除算）      → ' + String(evFromExposure(16, 0, 100)));
+  l.push('  ISO 欠損               → ' + String(evFromExposure(16, 1 / 125, null)));
+  return l.join('\n');
+}
+
+// ───────────────────────────────────────── 配線
+document.getElementById('pick').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (!f) return;
+  // 同じ写真を選び直しても change が発火するように空にする（経路1〜6 を同一写真で比べるため）。
+  // File の参照はすでに握っているので、ここで空にしても読み込みには影響しない。
+  e.target.value = '';
+  out.textContent = '読み込み中…';
+  // probe 全体を保険で包む。**例外で画面が空白になることを避ける**
+  probe(f).catch((err) => {
+    lines.push('');
+    lines.push('!! probe() が例外で停止しました: ' + (err && err.stack || err));
+    lines.push('');
+    lines.push('── 進捗 ──');
+    lines.push(steps.join('\n'));
+    flush();
+  });
+});
+
+document.getElementById('copy').addEventListener('click', (e) => {
+  const btn = e.currentTarget;
+  const done = (msg) => {
+    btn.textContent = msg;
+    setTimeout(() => { btn.textContent = '結果をコピー'; }, 1500);
+  };
+  // クリップボード API が無い／拒否された環境では全選択に落とす（手で長押しコピーできる）
+  const fallback = () => { window.getSelection().selectAllChildren(out); done('選択しました'); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(out.textContent).then(() => done('コピーしました'), fallback);
+  } else {
+    fallback();
+  }
+});
+
+// 起動時にセルフテストを出しておく（ファイルを選ばなくても式の妥当性が見える）
+lines = ['（ファイルを選んでください）'];
+H('起動時セルフテスト');
+W(selfTest());
+flush();
+</script>
+</body>
+</html>

@@ -681,7 +681,9 @@ export function compute(input) {
     filters: filterInfo(st),
   };
   // バッジにも helpId を持たせる。警告には ? が付くのにバッジからは校正手順へ行けない、
-  // という非対称を作らないため（report-a2 §6 で未実装として記録されていた導線）。
+  // という非対称を作らないため。**値は `HELP` ではなく `HELP_LINKS` から取る。**
+  // テスト #33 は「`HELP` の全値がいずれかの警告から発生する」ことを検証するので、
+  // 警告ではない導線（このバッジなど）を `HELP` に足すと #33 が永久に赤くなる。
   if (d.uncalibrated) d.badges.push({ kind: 'est', text: '推定値（未校正）', helpId: HELP_LINKS.calibration });
   attachedFilterWarnings(st, d);
 
