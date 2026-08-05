@@ -10,10 +10,13 @@ import {
 } from './flash.js';
 import { ndName, ndLabel } from './filters.js';
 import {
-  shakeWarning, overBrightWarning, freezeWarning, ndAdvice,
+  shakeWarning, overBrightWarning, freezeWarning, ndAdvice, blowoutWarning,
   daylightSync, slowSyncAmbient, formatStops, formatOffset, THIRD_STOP,
 } from './advisor.js';
-import { SUBJECTS, MODIFIERS, POWER_STEPS, HELP, HELP_LINKS } from './scenes.js';
+import {
+  SCENES, SUBJECTS, MODIFIERS, POWER_STEPS, HELP, HELP_LINKS,
+  HIGHLIGHT_HEADROOM_DEFAULT,
+} from './scenes.js';
 
 const SLOWEST = 2 ** (-SS.minIndex / 3); // 系列最遅（= 30″ の実体 32 秒）
 const F8 = 8; // 風景の固定F値
@@ -21,6 +24,54 @@ const F8 = 8; // 風景の固定F値
 const EQUIV_F_INDEXES = [9, 15, 21];
 /** 回折の閾値。「F11 を超えたら」なので F11 自身（実体 11.31）では出さない。 */
 const DIFFRACTION_F_INDEX = 21;
+
+/* ---- 公称値 → 1/3段グリッドの厳密値 ----------------------------------- */
+
+/**
+ * 公称値（ラベル）を 1/3段グリッドの厳密値へ直す。
+ * CLAUDE.md「**表示ラベルと厳密値は一致しない。`F5.6` の実体は 5.657**」。
+ * @param {import('./stops.js').Series} series
+ * @param {number} v 公称値
+ * @returns {number} グリッド上の厳密値（数値でなければそのまま返す）
+ */
+function gridExact(series, v) {
+  return Number.isFinite(v) && v > 0 ? snap(series, v).real : v;
+}
+
+/**
+ * 機材設定の公称値を厳密値へ直した状態を返す。**compute() の入口で1度だけ通す。**
+ *
+ * **なぜ要るか（実機で確認された不具合）。** 設定は人が読める公称値で保存される
+ * （`lens.fMin = 2.8`、`camera.syncSpeed = 1/250`）。これを厳密値として計算すると
+ * 本来ちょうど 6.0段 の壁が 6.06段 になり、`Math.ceil` が**まるごと1段多い ND**
+ * （ND8+ND16／7段）を選んでしまう。正しくは ND4+ND16（6段）。
+ *
+ * | 公称 | 厳密 | ずれ |
+ * | --- | --- | --- |
+ * | F2.8 | 2.8284 | 0.029段 |
+ * | 1/250 | 1/256 | 0.034段 |
+ * | 1/8000 | 1/8192 | 0.034段 |
+ *
+ * **`Math.ceil` の許容誤差（CEIL_EPS = 1e-9）では吸収できない。** 桁が7つ違う。
+ * 誤差側を広げて誤魔化すと、本当に切り上げが要る 6.1段 まで 6段 と答えるようになる。
+ * **ラベルを厳密値として使わない**——原因の側で直すのが正しい。
+ *
+ * ISO は公称値と厳密値が一致する（200 = 50·2²）ので直す必要がない。
+ * 焦点距離・距離・Ws は 1/3段グリッドの量ではないので対象外。
+ *
+ * @param {object} st @returns {object} 新しい状態（入力は変更しない）
+ */
+function exactGear(st) {
+  return {
+    ...st,
+    lens: { ...st.lens, fMin: gridExact(F, st.lens.fMin), fMax: gridExact(F, st.lens.fMax) },
+    camera: {
+      ...st.camera,
+      syncSpeed: gridExact(SS, st.camera.syncSpeed),
+      maxSS: gridExact(SS, st.camera.maxSS),
+    },
+  };
+}
 
 /* ---- 小さな純粋ヘルパー ------------------------------------------------ */
 
@@ -126,6 +177,28 @@ function modLossOf(key) { const m = MODIFIERS.find((x) => x.key === key); return
 
 /** 使用中プロファイル。 @param {object} st @returns {object} */
 function profileOf(st) { return st.profiles.find((p) => p.id === st.flash.profileId) || st.profiles[0]; }
+
+/**
+ * 白飛び警告を積む。**ストロボを使う意図だけ**（背景段数という概念が無い意図では出さない）。
+ * `costPerStop` は「背景を1段暗くするとストロボが失う段数」：
+ *   日中シンクロ → 1（同調速度の壁が1段上がり、ND か HSS 損失がその分増える）
+ *   スローシンクロ → 0（SS が動くだけ。SS はストロボ露出に影響しない）
+ * @param {object} st @param {object} d @param {number} costPerStop
+ */
+function pushBlowoutWarning(st, d, costPerStop) {
+  const scene = SCENES.find((s) => s.key === st.scene.key);
+  const w = blowoutWarning({
+    contrastStops: scene ? scene.contrast : null,
+    sceneLabel: scene ? scene.label : 'このシーン',
+    backlit: !!st.flash.backlit,
+    ambientOffset: st.flash.ambientOffset,
+    headroomStops: st.camera.highlightHeadroomStops ?? HIGHLIGHT_HEADROOM_DEFAULT,
+    // ストロボが余らせている段数。フル発光までの余裕がそのまま「背景を暗くできる段数」になる
+    flashHeadroomStops: d.flash ? d.flash.over : Infinity,
+    costPerStop,
+  });
+  if (w) d.warnings.push(w);
+}
 
 /** 被写体キー → 必要SS（秒, null可）。 */
 function subjectSSOf(key) { const s = SUBJECTS.find((x) => x.key === key); return s ? s.ss : null; }
@@ -588,10 +661,13 @@ function clampWarning(spec, stops, kind, nd) {
 
 /**
  * 状態から描画に必要な派生値をすべて求める純粋関数。
- * @param {object} st アプリ状態（ui.js の単一 state）
+ * @param {object} input アプリ状態（ui.js の単一 state。公称値のまま渡してよい）
  * @returns {object} derived
  */
-export function compute(st) {
+export function compute(input) {
+  // **入口で1度だけ公称値を厳密値へ直す**（F2.8→2.8284、1/250→1/256）。
+  // ここから先は全部グリッド上の厳密値。個々の計算で snap し直さないこと。
+  const st = exactGear(input);
   const evScene = st.scene.evBase + st.scene.adjust;
   const flashOn = st.intent === 'daylightSync' || st.intent === 'slowSync';
   const prof = profileOf(st);
@@ -765,6 +841,9 @@ function computeDaylight(st, evScene, prof, modLoss, d) {
     d.warnings.push({ level: 'alert', icon: 'alert', helpId: HELP.syncWall, message: '同調速度の壁を越えられません。F を絞ってください' });
   }
 
+  // 白飛び判定は d.flash（ストロボの余裕）が決まってから。壁が1段上がると ND が1段増える
+  pushBlowoutWarning(st, d, 1);
+
   d.ruler = { deviation: 0, tracks: buildTracks(ambSnap, powerStops) };
   d.mainFIndex = ambSnap.f.index;
 }
@@ -815,6 +894,10 @@ function computeSlow(st, evScene, prof, modLoss, d) {
   if (powerStops === 0) {
     d.warnings.push({ level: 'info', icon: 'flash', helpId: HELP.recycle, message: 'フル発光に近く、連写ではチャージが追いつきません' });
   }
+
+  // 白飛び判定。スローシンクロで背景段数を下げても動くのは SS だけで、
+  // SS はストロボ露出に影響しないので、ストロボ側のコストは 0。
+  pushBlowoutWarning(st, d, 0);
 
   d.ruler = { deviation: 0, tracks: buildTracks(ambSnap, powerStops) };
   d.mainFIndex = ambSnap.f.index;

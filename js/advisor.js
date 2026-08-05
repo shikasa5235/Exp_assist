@@ -5,7 +5,7 @@ import { evTarget, solveSS, solveN, handShakeLimit } from './exposure.js';
 import { solveND, ndLabel } from './filters.js';
 import { gnBase, applyModifier, applyIso, effectiveGN, hssLoss } from './flash.js';
 import { F, SS, snap } from './stops.js';
-import { HELP } from './scenes.js';
+import { HELP, BACKLIT_EXTRA_STOPS, AMBIENT_OFFSETS } from './scenes.js';
 
 /**
  * 警告の発火閾値（段）。1/3段未満のズレは表示の丸め幅に埋もれ、
@@ -13,6 +13,24 @@ import { HELP } from './scenes.js';
  * クランプ警告（compute 側）でも同じ方針を使うので export する。
  */
 export const THIRD_STOP = 1 / 3;
+
+/**
+ * 段数を「実在する整数段の機材」（ND）へ切り上げるときに吸収する誤差（段）。
+ *
+ * **IEEE754 の丸め誤差だけを吸収するための値。**
+ * `2 ** (i/6)` などで作った 1/3段の値どうしの比を `log2` で段数に戻すと、
+ * 本来ちょうど整数のところが `6.000000000000001` になることがある。
+ * `Math.ceil` はこれを 7 に飛ばし、**ND がまるごと1段増える。**
+ *
+ * **特定の経路の保険ではない。** 1/3段グリッドの全組み合わせ（40×40）を走査すると
+ * `2·log2(F/F)` の経路で 215/1600、`log2(N²/t)` の経路で 28/1600 に誤差が乗る。
+ * 約13%。**段数を切り上げるすべての箇所で必要。**
+ *
+ * **公称ラベル（F2.8 / 1/250）を厳密値として扱ってしまう誤差はここでは吸収しない。**
+ * あちらは 0.03〜0.09段 と桁が7つ違い、`compute.exactGear()` が入口で厳密値へ直して潰す。
+ * ここを大きくして誤魔化すと、本当に切り上げが要る 6.1段 を 6段 と答えるようになる。
+ */
+export const CEIL_EPS = 1e-9;
 
 /**
  * 段数を人間可読に整形する。整数はそのまま、端数は小数第1位まで。
@@ -72,7 +90,7 @@ export function shakeWarning(ssReal, focal, isStops = 0) {
  */
 export function ndAdvice(ownedND, requiredStops, attachedStops = 0) {
   const owned = ownedND || [];
-  const need = Math.ceil(attachedStops + requiredStops - 1e-9);
+  const need = Math.ceil(attachedStops + requiredStops - CEIL_EPS);
   if (need <= 0 || owned.length === 0) {
     return { text: '', ok: false, solution: null, need: Math.max(0, need) };
   }
@@ -153,6 +171,84 @@ export function freezeWarning(durationReal, subjectSSReal) {
   };
 }
 
+/** 背景段数のラベル。整数の選択肢なので「−2段」の形に整える（formatOffset は小数第1位）。 */
+function offsetLabel(o) {
+  return o > 0 ? `+${o}段` : o === 0 ? '0段' : `−${Math.abs(o)}段`;
+}
+
+/**
+ * 白飛び警告。**適正露出でも空は飛ぶ**ことを段数ではなく「選ぶべき背景段数」で伝える。
+ * 仕様 §11 / photocal-spec §5.1・§5.2・§5.4。
+ *
+ *   オーバー段数 = コントラスト目安 + 背景段数 − ヘッドルーム
+ *
+ * 段数そのものより背景段数を出すのは、目安の精度が±1段しかないため。
+ * 「4.5段の差がある」より「背景を−2段にすれば残る」のほうが誤差に強く、そのまま行動に移せる。
+ *
+ * @param {Object} p
+ * @param {number|null} p.contrastStops シーンのコントラスト目安（null なら判定しない）
+ * @param {string} p.sceneLabel シーン名（文言に出す）
+ * @param {boolean} [p.backlit=false] 逆光なら BACKLIT_EXTRA_STOPS を足す
+ * @param {number} [p.ambientOffset=0] 現在の背景段数（符号付き）
+ * @param {number} [p.headroomStops=3] ハイライトのヘッドルーム
+ * @param {number[]} [p.offsets] 選べる背景段数
+ * @param {number} [p.flashHeadroomStops=Infinity] ストロボが余らせている段数（フル発光までの余裕）
+ * @param {number} [p.costPerStop=0] 背景を1段暗くするとストロボが失う段数
+ *   （日中シンクロは同調速度の壁が1段上がるので 1。スローシンクロは SS が動くだけなので 0）
+ * @returns {{level:string,icon:string,helpId:string,message:string,overStops:number,
+ *            recommendedOffset:number|null}|null}
+ */
+export function blowoutWarning(p) {
+  const {
+    contrastStops, sceneLabel = 'このシーン', backlit = false, ambientOffset = 0,
+    headroomStops = 3.0, offsets = AMBIENT_OFFSETS,
+    flashHeadroomStops = Infinity, costPerStop = 0,
+  } = p;
+  if (contrastStops == null) return null; // 判定を持たないシーン（屋内・夜間・薄暮）
+  const contrast = contrastStops + (backlit ? BACKLIT_EXTRA_STOPS : 0);
+  const overOf = (o) => contrast + o - headroomStops;
+  const over = overOf(ambientOffset);
+  if (over < THIRD_STOP) return null; // 1/3段未満は表示の丸め幅に埋もれる（他の警告と同じ閾値）
+
+  // 空が残る最も明るい背景段数。判定の閾値を警告と揃える（ここだけ厳しくすると推奨が1段ずれる）
+  const safe = offsets.filter((o) => overOf(o) < THIRD_STOP);
+  const recommended = safe.length ? Math.max(...safe) : null;
+
+  // 現在値から推奨（無ければ最も暗い選択肢）までを並べる。明るい順
+  const floorOffset = recommended == null ? Math.min(...offsets) : recommended;
+  const rows = offsets
+    .filter((o) => o <= ambientOffset && o >= floorOffset)
+    .sort((a, b) => b - a)
+    .map((o) => {
+      const ov = overOf(o);
+      const verdict = ov >= THIRD_STOP ? `${formatStops(ov)}段オーバー` : '空が残ります';
+      return `背景 ${offsetLabel(o)} → ${verdict}${o === recommended ? '（推奨）' : ''}`;
+    });
+
+  const head = `空が飛ぶ可能性があります（${sceneLabel}${backlit ? '・逆光' : ''}の目安 ${formatStops(contrast)}段）`;
+  const tail = '※空を飛ばす表現を狙う場合はこの警告を無視してかまいません';
+  const parts = [head, rows.join('／')];
+
+  if (recommended == null) {
+    parts.push(`背景を ${offsetLabel(floorOffset)} まで落としても空は残りません。露出を諦めるか、空を画角から外してください`);
+  } else {
+    // **提案が別の警告を生まないか検証する。** 背景を暗くすると日中シンクロでは
+    // 同調速度の壁が上がり、ND か HSS 損失が増えてストロボが届かなくなる。
+    const need = (ambientOffset - recommended) * costPerStop;
+    if (need > flashHeadroomStops + THIRD_STOP) {
+      const shortStops = formatStops(need - flashHeadroomStops);
+      parts.push(`ただし背景 ${offsetLabel(recommended)} では光量が ${shortStops}段 足りません（減光がその分増えるため）。距離を詰めるか ISO を上げてください`);
+    }
+  }
+  parts.push(tail);
+
+  return {
+    level: 'warn', icon: 'nd', helpId: HELP.blowout,
+    overStops: over, recommendedOffset: recommended,
+    message: parts.join('。').replace(/。。/g, '。'),
+  };
+}
+
 /**
  * ND 枚数に関する警告群。仕様 §6 / §9 / 確定事項。
  * - 2枚以上：拡張 ISO まで下げれば枚数を減らせる旨を info で提示。
@@ -169,7 +265,7 @@ export function ndCountWarnings(nd, ctx) {
   if (nd.count >= 2 && !allowExpandedIso) {
     const drop = Math.log2(baseISO / expandedISOMin);
     const reducedWall = wallStops - drop;
-    const reduced = reducedWall <= 0 ? { count: 0 } : solveND(ownedND, Math.ceil(reducedWall - 1e-9));
+    const reduced = reducedWall <= 0 ? { count: 0 } : solveND(ownedND, Math.ceil(reducedWall - CEIL_EPS));
     const rc = reduced ? reduced.count : null;
     const tail = rc === 0 ? 'ND が不要になります'
       : rc != null ? `ND ${rc}枚で済みます`
@@ -239,7 +335,7 @@ export function daylightSync(p) {
   const gnIso = applyIso(applyModifier(gnBase(ws, k), modLoss), iso);
 
   // ND 経路：壁の段数を ND でカバーし、SS を同調速度に留める
-  const need = Math.ceil(wallStops - 1e-9);
+  const need = Math.ceil(wallStops - CEIL_EPS);
   const nd = solveND(ownedND, need);
   if (nd) {
     const gnEff = effectiveGN(gnIso, 0, nd.totalStops, 0);

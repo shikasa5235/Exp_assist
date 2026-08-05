@@ -56,14 +56,14 @@
   <script type="module">
     import { F, SS, ISO, snap } from './js/stops.js';
     import { solveSS, solveN, solveISO, handShakeLimit } from './js/exposure.js';
-    import { solveND } from './js/filters.js';
+    import { solveND, ndLabel } from './js/filters.js';
     import {
       gnBase, applyModifier, applyIso, effectiveGN,
       calibrate, hssLoss, overStops, resolvePower, flashDuration,
     } from './js/flash.js';
     import {
-      shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning,
-      daylightSync, slowSyncAmbient, ndCountWarnings, formatStops,
+      shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning, blowoutWarning,
+      daylightSync, slowSyncAmbient, ndCountWarnings, formatStops, ndAdvice,
     } from './js/advisor.js';
     import { SUBJECTS, POWER_STEPS, HELP } from './js/scenes.js';
     import { compute } from './js/compute.js';
@@ -615,23 +615,29 @@
         pass: ok,
       };
     });
-    add('31d', 'compute 計算タブ: クランプしても不足が 1/3段未満なら警告しない', () => {
-      // 必要 F = √(2^11 / 2^(25/3)) = √(2048/322.54) = 2.518
-      // 開放 F2.6 でクランプされるが不足は 2*log2(2.6/2.518) = 0.09段 → 1/3段未満なので出さない
+    add('31d', 'compute 計算タブ: クランプしても超過が 1/3段未満なら警告しない', () => {
+      // 自由軸 ISO でみる。**F と SS はグリッドの厳密値を index で渡す**ので、
+      // compute の exactGear（公称値→厳密値）の影響を受けない条件になっている。
+      //   F5.6(実体 5.657) / SS 1/250(実体 1/256) / EV12.2
+      //   → 必要 ISO = 100·(32/(1/256))/2^12.2 = 174.1（下限 200 を 0.2段 下回る）
+      //   0.2段 < 1/3段 なのでクランプはするが警告は出さない
       const st = makeState({
         ui: { tab: 'calc', theme: 'auto', firstRun: false },
-        scene: { evBase: 10, adjust: 0 },
+        scene: { evBase: 12.2, adjust: 0 },
         camera: { isoMin: 200 },
-        lens: { fMin: 2.6, fMax: 22 },
-        manual: { fIndex: null, ssIndex: 25, isoIndex: 6, locks: { f: false, ss: true, iso: true } },
+        lens: { fMin: F28, fMax: 22 },
+        manual: { fIndex: 15, ssIndex: 24, isoIndex: null, locks: { f: true, ss: true, iso: false } },
       });
       const d = compute(st);
-      const need = Math.sqrt(SS.real(25) * 2 ** 11); // 2.518（クランプ前の連続値）
-      const shortStops = 2 * Math.log2(2.6 / need);  // 0.09段
-      const ok = d.manual.warning === null && shortStops > 0 && shortStops < 1 / 3;
+      const need = 100 * (F.real(15) ** 2 / SS.real(24)) / 2 ** 12.2; // 174.1（クランプ前の連続値）
+      const overStops = Math.log2(200 / need);                        // 0.2段
+      // クランプが実際に起きていること（＝空振りでないこと）も確かめる
+      const ok = d.manual.warning === null && overStops > 0 && overStops < 1 / 3
+        && need < 200 && d.ambient.isoLabel === '200';
       return {
-        expected: `警告なし（不足 ${shortStops.toFixed(2)}段 < 1/3段）`,
-        actual: d.manual.warning ? d.manual.warning.message : '警告なし',
+        expected: `警告なし・ISO200 にクランプ（超過 ${overStops.toFixed(2)}段 < 1/3段）`,
+        actual: `${d.manual.warning ? d.manual.warning.message : '警告なし'} / ISO${d.ambient.isoLabel}`
+          + ` / 連続値 ${need.toFixed(1)}`,
         pass: ok,
       };
     });
@@ -642,7 +648,9 @@
     //
     // 残差 s 段を作る EV：ss = maxSS / 2^s となる evBase を逆算する。
     //   EV_target = log2(N² / ss) = log2(N²/maxSS) + s、evBase = EV_target − log2(ISO/100)
-    const OB_F = 1.4, OB_MAXSS = 1 / 8000, OB_ISO = 200;
+    // compute() は入口で公称値をグリッドの厳密値へ直す（exactGear）。ここも厳密値で組み立てる
+    // ——公称の 1.4 / (1/8000) を使うと、逆算した EV と compute の内部値が 0.03段ずれる。
+    const OB_F = F.real(3), OB_MAXSS = SS.real(39), OB_ISO = 200; // F1.4(1.41421) / 1/8000(1/8192)
     const evForResidual = (s) => Math.log2((OB_F * OB_F) / OB_MAXSS) + s - Math.log2(OB_ISO / 100);
     const overBrightState = (s) => makeState({
       intent: 'blur', subject: 'static', focal: 50,
@@ -802,6 +810,145 @@
           + ` / 実際 ${after.flash.powerLabel} / 警告${gone ? '消えた' : '残った'}`
           + ` / ずれる例=${isTheTrickyCase} / ${w.message}`,
         pass: labelMatches && powerMatches && gone && asPromised && isTheTrickyCase,
+      };
+    });
+
+    // ===== ND が1段過剰になる問題（原因は2つ。どちらも ceil が段を飛ばす）==========
+    //
+    // (1) 公称ラベルを厳密値として計算していた ── **実機の症状の原因**
+    //     快晴EV15/ISO200/F2.8/同調1/250/背景−1段 で ND8+ND16（7段）が選ばれた。
+    //     正しくは 6.0段 ちょうどで ND4+ND16（2枚）。設定は公称値（2.8 / 1/250）で保存され、
+    //     厳密値として計算すると壁が 6.06段 になる。→ compute.exactGear() が入口で直す。N1 が守る。
+    //
+    // (2) IEEE754 の丸め誤差 ── 桁が7つ小さい別の問題
+    //     比を log2 で段数化すると、ちょうど整数のところが 6.000000000000001 になることがある。
+    //     1/3段グリッドの組み合わせのうち約13%（2·log2(F/F) で 215/1600）。
+    //     **特定の経路の問題ではない。** → advisor.CEIL_EPS が吸収する。N2a・N2b が守る。
+    add('N1', 'ND選択: 公称値(F2.8・1/250)で入力しても壁は 6.0段・ND4+ND16(2枚)', () => {
+      // **わざと公称値を渡す。** exactGear が 2.8284 / 1/256 へ直せば 6.0段 になる
+      const d = compute(makeState({
+        intent: 'daylightSync',
+        scene: { key: 'sunny', evBase: 15, adjust: 0 },
+        camera: { syncSpeed: 1 / 250, isoMin: 200, expandedISOMin: 50 },
+        lens: { fMin: 2.8, fMax: 22 },
+        settings: { ownedND: [1, 2, 3, 4], hssBaseLoss: 2, ambientOffsetDefault: -1, comp: 0, blackMistStops: 0 },
+        flash: { profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'auto', powerStops: 5 },
+      }));
+      const nd = d.paths.nd;
+      // 裏付け：拡張ISO の案内も内部値と整合する（7段なら「2枚」、6段なら「1枚」）
+      const info = d.warnings.find((w) => /拡張ISO/.test(w.message));
+      const ok = !!nd && nd.nd === 'ND4+ND16' && nd.lossStops === 6
+        && rel(d.wall.stops, 6, 0.001)
+        && !!info && /ND 1枚で済みます/.test(info.message);
+      return {
+        expected: '壁 6.00段 / ND4+ND16(6段) / 拡張ISOなら1枚',
+        actual: `壁 ${d.wall ? d.wall.stops.toFixed(3) : '—'}段 / ${nd ? `${nd.nd}(${nd.lossStops}段)` : 'ND経路なし'}`
+          + ` / ${info ? info.message : '拡張ISO案内なし'}`,
+        pass: ok,
+      };
+    });
+    add('N2a', 'ceil の許容誤差: 6.000000000000001 を渡すと 7 ではなく 6 になる（単体）', () => {
+      // **リテラルで渡す。** パイプラインを通して誤差を作ろうとすると、途中の演算で
+      // 吸収されて空振りする（一度これで失敗した）。境界そのものをここで固定する。
+      const drifted = 6.000000000000001;
+      const adv = ndAdvice([1, 2, 3, 4], drifted, 0);
+      const ok = drifted > 6                 // リテラルが本当に 6 より大きい double であること
+        && Math.ceil(drifted) === 7          // 素の ceil なら1段飛ぶ（CEIL_EPS が要る理由）
+        && adv.need === 6                    // CEIL_EPS 付きなら 6 に収まる
+        && adv.solution && adv.solution.totalStops === 6 && adv.solution.count === 2
+        && ndLabel(adv.solution.filters) === 'ND4+ND16';
+      return {
+        expected: '素の ceil は 7 / CEIL_EPS 付きで need=6 / ND4+ND16(2枚)',
+        actual: `素の ceil ${Math.ceil(drifted)} → need=${adv.need}`
+          + ` / ${adv.solution ? ndLabel(adv.solution.filters) : 'なし'}`,
+        pass: ok,
+      };
+    });
+    add('N2b', 'ceil の許容誤差が実際の経路に配線されている（F1.8希望・同調でF14適正）', () => {
+      // 誤差は「比を log2 で段数化する経路」全般で出る（1/3段の組み合わせの約13%）。
+      // 2·log2(F.real(23)/F.real(5)) = 2·log2(14.254/1.782) は数学的にちょうど 6.0 で、
+      // 整数の境目に載る。**1ビットの上振れで ceil が 7 に飛ぶ位置。**
+      //
+      // 逆算：fAtSync = √(同調 × 2^evAmbient) を F.real(23) にする
+      //   同調 1/250 → 厳密 2^-8、F.real(23)² = 2^(23/3)
+      //   → 2^evAmbient = 2^(23/3+8) = 2^(47/3) → evAmbient = 47/3 = 15.6667
+      //   evAmbient = evScene + log2(ISO/100) − 背景段数 = evScene + 1 + 1
+      //   → evScene = 47/3 − 2 = 41/3 = 13.6667（= EV13 + 微調整 +2/3。スライダー上の値）
+      const d = compute(makeState({
+        intent: 'daylightSync',
+        scene: { key: 'cloudy', evBase: 13, adjust: 2 / 3 },
+        camera: { syncSpeed: 1 / 250, isoMin: 200, expandedISOMin: 50 },
+        lens: { fMin: 1.8, fMax: 22 }, // 公称 F1.8 → 厳密 F.real(5) = 1.7817974362806785
+        settings: { ownedND: [1, 2, 3, 4], hssBaseLoss: 2, ambientOffsetDefault: -1, comp: 0, blackMistStops: 0 },
+        flash: { profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: -1, tripod: true, powerMode: 'auto', powerStops: 5 },
+      }));
+      const nd = d.paths.nd;
+      // 参考値：ユーザーが走査で 6.000000000000001 を観測した組み合わせ。
+      // アプリは sqrt 経由で fAtSync を出すので最下位ビットは一致しないことがある。
+      // **assert には使わない**（環境依存の1ビットに合否を預けない）。実測値は下に表示する。
+      const ref = 2 * Math.log2(F.real(23) / F.real(5));
+      const ok = !!nd && nd.lossStops === 6 && nd.nd === 'ND4+ND16'
+        && rel(d.wall.stops, 6, 1e-6)          // 数学的には 6.0。誤差は 1e-9 より十分小さい
+        && d.paths.nd.ss === '1/250';          // 同調に留まる経路であること
+      return {
+        expected: '壁 6.00段 / ND4+ND16(6段) — 素の ceil なら 7段(ND8+ND16) になる位置',
+        actual: `壁 ${d.wall ? d.wall.stops.toFixed(15) : '—'}段`
+          + ` / ${nd ? `${nd.nd}(${nd.lossStops}段)` : 'ND経路なし'}`
+          + ` / 参考 2·log2(F14/F1.8)=${ref.toFixed(15)}`,
+        pass: ok,
+      };
+    });
+
+    // ===== 白飛び警告（測らない方式）========================================
+    // 適正露出でも空は飛ぶ。中間調から上のヘッドルームが JPEG で約3段しかないため。
+    //   オーバー段数 = コントラスト目安 + 背景段数 − ヘッドルーム
+    // 段数そのものより「選ぶべき背景段数」を出す（目安の精度が±1段なので誤差に強い）。
+    add('C1', '白飛び: 快晴・逆光(2.5+2.0=4.5段)/背景0段/余裕3.0 → 1.5段オーバー・推奨−2段', () => {
+      const w = blowoutWarning({
+        contrastStops: 2.5, sceneLabel: '快晴・順光', backlit: true,
+        ambientOffset: 0, headroomStops: 3.0,
+      });
+      const ok = !!w && rel(w.overStops, 1.5, 0.02) && w.recommendedOffset === -2
+        && /目安 4\.5段/.test(w.message)
+        && /背景 0段 → 1\.5段オーバー/.test(w.message)
+        && /背景 −2段 → 空が残ります（推奨）/.test(w.message)
+        && /無視してかまいません/.test(w.message); // 意図的に飛ばす表現への逃げ道は必須
+      return {
+        expected: 'over 1.5段 / 推奨 −2 / ラダーと「無視してかまいません」',
+        actual: w ? `over ${w.overStops.toFixed(2)} / 推奨 ${w.recommendedOffset} / ${w.message}` : '警告なし',
+        pass: ok,
+      };
+    });
+    add('C2', '白飛び: 曇り(1.5段)/背景−1段/余裕3.0 → 警告を出さない（−2.5段で余裕）', () => {
+      const w = blowoutWarning({
+        contrastStops: 1.5, sceneLabel: '曇り', ambientOffset: -1, headroomStops: 3.0,
+      });
+      return {
+        expected: `警告なし（1.5 + (−1) − 3.0 = −2.5）`,
+        actual: w ? w.message : '警告なし',
+        pass: w === null,
+      };
+    });
+    add('C3', '白飛び: 推奨の背景段数でストロボが届かないなら「光量が足りません」を併記', () => {
+      // 背景 0段 → 推奨 −2段。日中シンクロは1段暗くするごとに壁が1段上がり ND が1段増えるので
+      // 2段ぶんの余裕が要る。ストロボの余裕が 0.5段しかないので 1.5段 足りない。
+      const w = blowoutWarning({
+        contrastStops: 2.5, sceneLabel: '快晴・順光', backlit: true,
+        ambientOffset: 0, headroomStops: 3.0,
+        flashHeadroomStops: 0.5, costPerStop: 1,
+      });
+      const ok = !!w && /背景 −2段 では光量が 1\.5段 足りません/.test(w.message);
+      // 余裕が足りていれば併記しないことも同時に確かめる（常に出るのでは意味がない）
+      const enough = blowoutWarning({
+        contrastStops: 2.5, sceneLabel: '快晴・順光', backlit: true,
+        ambientOffset: 0, headroomStops: 3.0,
+        flashHeadroomStops: 3.0, costPerStop: 1,
+      });
+      const okQuiet = !!enough && !/光量が/.test(enough.message);
+      return {
+        expected: '余裕0.5段→「1.5段 足りません」を併記／余裕3.0段→併記しない',
+        actual: `${w ? w.message : '警告なし'} ／ 余裕3.0段のとき併記${okQuiet ? 'なし' : 'あり'}`,
+        pass: ok && okQuiet,
       };
     });
 
@@ -1084,6 +1231,7 @@
       push(overBrightWarning(solveSS(16, 100, F.real(3)), SS.real(39))); // 明るすぎ（減光）
       push(isoFloorWarning(25, 50));                                  // ISO 下げきれない
       push(freezeWarning(POWER_STEPS[0].duration, 1 / 500));          // 閃光時間
+      push(blowoutWarning({ contrastStops: 2.5, sceneLabel: '快晴・順光', backlit: true, ambientOffset: 0, headroomStops: 3.0 })); // 白飛び
       push(ndCountWarnings(solveND([1, 2, 3, 4], 5), { baseISO: 200, expandedISOMin: 50, ownedND: [1, 2, 3, 4], wallStops: 5 }));
       push(ndCountWarnings(solveND([1, 2, 3, 4], 8), { baseISO: 200, expandedISOMin: 50, ownedND: [1, 2, 3, 4], wallStops: 8 }));
 

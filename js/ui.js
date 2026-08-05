@@ -11,8 +11,9 @@
 import { compute } from './compute.js';
 import { formatStops } from './advisor.js';
 import {
-  SCENES, SUBJECTS, MODIFIERS, POWER_STEPS,
+  SCENES, SUBJECTS, MODIFIERS, POWER_STEPS, AMBIENT_OFFSETS,
   K_MIN, K_MAX, HSS_BASE_LOSS_MIN, HSS_BASE_LOSS_MAX, BLACK_MIST_STOPS_MAX,
+  HIGHLIGHT_HEADROOM_MIN, HIGHLIGHT_HEADROOM_MAX,
 } from './scenes.js';
 import { F, SS, ISO } from './stops.js';
 import { calibrate } from './flash.js';
@@ -31,7 +32,9 @@ const INTENTS = [
 ];
 const FOCALS = [24, 35, 50, 85, 135, 200];
 const DISTANCES = [1, 1.5, 2, 3, 5, 8];
-const AMBIENTS = [-3, -2, -1, 0, 1];
+// 白飛び警告が「選ぶべき背景段数」を推奨するので、選択肢は scenes.js に置いて共有する
+// （UI と計算で別々に持つと、推奨した値がチップに無い、という食い違いが起きる）
+const AMBIENTS = AMBIENT_OFFSETS;
 
 
 /* ---- モジュールスコープの単一状態 ------------------------------------ */
@@ -71,6 +74,9 @@ function cacheElements() {
     'scene-tiles', 'scene-adjust', 'scene-adjust-val', 'focal-chips', 'intent-chips',
     'subject-field', 'subject-chips', 'flash-panel', 'flash-profile', 'uncalibrated-badge',
     'flash-modifier', 'distance-chips', 'ambient-chips', 'tripod-field', 'tripod-toggle',
+    // backlit-field は出し入れしない（日中・スローの両方で使う）。ストロボパネル内なので
+    // ストロボ OFF のときはパネルごと隠れる。参照が要るのはトグル本体だけ
+    'backlit-toggle',
     'curtain-field', 'curtain-toggle', 'result-panel', 'wall-readout', 'wall-num',
     'result-badges', 'ev-ruler', 'result-systems', 'path-compare', 'warnings', 'toast',
     'result-announce',
@@ -257,6 +263,7 @@ function wireEvents() {
   el.flashModifier.addEventListener('change', (e) => setState({ flash: { modifier: e.target.value } }));
 
   // トグル
+  el.backlitToggle.addEventListener('click', () => setState({ flash: { backlit: !state.flash.backlit } }));
   el.tripodToggle.addEventListener('click', () => setState({ flash: { tripod: !state.flash.tripod } }));
   el.curtainToggle.addEventListener('click', () => setState({ flash: { curtain: !state.flash.curtain } }));
 
@@ -567,6 +574,7 @@ function renderTab1() {
   el.flashModifier.value = state.flash.modifier;
 
   // トグル
+  el.backlitToggle.setAttribute('aria-checked', String(state.flash.backlit));
   el.tripodToggle.setAttribute('aria-checked', String(state.flash.tripod));
   el.curtainToggle.setAttribute('aria-checked', String(state.flash.curtain));
   // 拡張ISO（かんたん・計算の両方に同じ state を反映）
@@ -858,6 +866,8 @@ const FLAT_SETTINGS = [
   { group: 0, path: 'settings.comp', label: '露出補正(段)', kind: 'num', min: -5, max: 5 },
   { group: 0, path: 'camera.maxSS', label: 'SS上限 (1/x秒)', kind: 'recip', min: 60, max: 16000 },
   { group: 0, path: 'camera.syncSpeed', label: '同調速度 (1/x秒)', kind: 'recip', min: 30, max: 500 },
+  // 中間調から飽和までの余裕。JPEG 約3段／RAW 3.5〜4段。白飛び判定にだけ効く
+  { group: 0, path: 'camera.highlightHeadroomStops', label: 'ハイライト余裕(段)', kind: 'num', min: HIGHLIGHT_HEADROOM_MIN, max: HIGHLIGHT_HEADROOM_MAX },
   { group: 2, path: 'settings.hssBaseLoss', label: 'HSS基準損失(段)', kind: 'num', min: HSS_BASE_LOSS_MIN, max: HSS_BASE_LOSS_MAX },
   { group: 2, path: 'settings.ambientOffsetDefault', label: '既定アンビエント段数', kind: 'num', min: -3, max: 1 },
   // ブラックミストは公称ほぼ減光なし。実測で微小な減光がある場合に備えて調整可

@@ -6,25 +6,58 @@
  * ±1段程度の目安。UI 側で ±2段(1/3刻み)の微調整を用意する前提。
  * @type {ReadonlyArray<{key:string,label:string,ev:number,group:string}>}
  */
+/**
+ * `contrast` = **空（または最も明るい背景）が被写体より何段明るいか**の目安（段）。
+ * 白飛び判定に使う（仕様 §11 / photocal-spec §5.4）。**±1段の推定値。**
+ *
+ * `null` は「このシーンでは判定しない」。屋内・夜間と薄暮では、最も明るい背景が
+ * 光源そのもの（窓・街灯・空の残光）で、被写体との差は**シーンEV ではなく画角の切り方で決まる。**
+ * 表で当てられないので、当てずっぽうの警告を出さずに黙る。
+ *
+ * 逆光は EV では区別できないので、`flash.backlit` トグルで `BACKLIT_EXTRA_STOPS` を足す。
+ * 快晴 2.5 + 2.0 = 4.5（＝仕様の「快晴・逆光」）、薄曇り 2.0 + 2.0 = 4.0（＝同「晴れ・日陰の被写体」）。
+ */
 export const SCENES = Object.freeze([
   // 屋外
-  { key: 'snow',       label: '雪山・砂浜の直射', ev: 16, group: '屋外' },
-  { key: 'sunny',      label: '快晴・順光',       ev: 15, group: '屋外' },
-  { key: 'hazySun',    label: '晴れ・薄曇り',     ev: 14, group: '屋外' },
-  { key: 'cloudy',     label: '曇り',             ev: 13, group: '屋外' },
-  { key: 'heavyCloud', label: '厚い曇り／日陰',   ev: 12, group: '屋外' },
-  { key: 'sunset',     label: '日没直後',         ev: 11, group: '屋外' },
-  { key: 'twilight',   label: '薄暮',             ev: 9,  group: '屋外' },
+  { key: 'snow',       label: '雪山・砂浜の直射', ev: 16, group: '屋外', contrast: 2.5 },
+  { key: 'sunny',      label: '快晴・順光',       ev: 15, group: '屋外', contrast: 2.5 },
+  { key: 'hazySun',    label: '晴れ・薄曇り',     ev: 14, group: '屋外', contrast: 2.0 },
+  { key: 'cloudy',     label: '曇り',             ev: 13, group: '屋外', contrast: 1.5 },
+  { key: 'heavyCloud', label: '厚い曇り／日陰',   ev: 12, group: '屋外', contrast: 1.0 },
+  { key: 'sunset',     label: '日没直後',         ev: 11, group: '屋外', contrast: 2.0 },
+  { key: 'twilight',   label: '薄暮',             ev: 9,  group: '屋外', contrast: null },
   // 屋内・夜間
-  { key: 'shop',       label: '明るい店舗',       ev: 8,  group: '屋内・夜間' },
-  { key: 'neon',       label: '夜の繁華街',       ev: 8,  group: '屋内・夜間' },
-  { key: 'stage',      label: 'ステージ・体育館', ev: 7,  group: '屋内・夜間' },
-  { key: 'room',       label: '一般的な室内',     ev: 5,  group: '屋内・夜間' },
-  { key: 'street',     label: '街灯のある夜道',   ev: 4,  group: '屋内・夜間' },
-  { key: 'candle',     label: 'ろうそく／間接',   ev: 3,  group: '屋内・夜間' },
-  { key: 'moon',       label: '満月の風景',       ev: -2, group: '屋内・夜間' },
-  { key: 'milkyway',   label: '天の川・星景',     ev: -6, group: '屋内・夜間' },
+  { key: 'shop',       label: '明るい店舗',       ev: 8,  group: '屋内・夜間', contrast: null },
+  { key: 'neon',       label: '夜の繁華街',       ev: 8,  group: '屋内・夜間', contrast: null },
+  { key: 'stage',      label: 'ステージ・体育館', ev: 7,  group: '屋内・夜間', contrast: null },
+  { key: 'room',       label: '一般的な室内',     ev: 5,  group: '屋内・夜間', contrast: null },
+  { key: 'street',     label: '街灯のある夜道',   ev: 4,  group: '屋内・夜間', contrast: null },
+  { key: 'candle',     label: 'ろうそく／間接',   ev: 3,  group: '屋内・夜間', contrast: null },
+  { key: 'moon',       label: '満月の風景',       ev: -2, group: '屋内・夜間', contrast: null },
+  { key: 'milkyway',   label: '天の川・星景',     ev: -6, group: '屋内・夜間', contrast: null },
 ]);
+
+/**
+ * 逆光のときコントラスト目安に足す段数。仕様 §11。
+ * 逆光かどうかはシーンEV では区別できない（同じ EV で順光にも逆光にもなる）ため、
+ * シーンの表に列を増やすのではなくトグル1つで足す。
+ */
+export const BACKLIT_EXTRA_STOPS = 2.0;
+
+/**
+ * アンビエント目標段数の選択肢（符号付き。−1 = 背景を1段暗く）。
+ * **白飛び警告が「選ぶべき背景段数」を出すために計算側でも必要**なのでここに置く
+ * （UI と計算で別々の配列を持つと、推奨した値がチップに無い、という食い違いが起きる）。
+ */
+export const AMBIENT_OFFSETS = Object.freeze([-3, -2, -1, 0, 1]);
+
+/**
+ * ハイライトのヘッドルーム（段）。中間調から飽和までの余裕。仕様 §11。
+ * JPEG は約3段、RAW なら 3.5〜4段。**機種差があるので設定で調整できる。**
+ */
+export const HIGHLIGHT_HEADROOM_DEFAULT = 3.0;
+export const HIGHLIGHT_HEADROOM_MIN = 2.0;
+export const HIGHLIGHT_HEADROOM_MAX = 4.5;
 
 /**
  * 被写体ブレの必要 SS（秒）。仕様 §7.2。ss=null は制約なし。
@@ -103,6 +136,7 @@ export const HELP = Object.freeze({
   powerMode: 'help-power-mode',
   powerCeiling: 'help-power-ceiling',
   calcClamp: 'help-calc-clamp',
+  blowout: 'help-blowout',
   ok: 'help-warnings',
 });
 

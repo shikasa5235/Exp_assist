@@ -176,6 +176,13 @@
           <div class="field-label" id="lbl-ambient">背景（アンビエント目標段数）</div>
           <div class="chip-row" id="ambient-chips" role="radiogroup" aria-labelledby="lbl-ambient"></div>
         </div>
+        <!-- 逆光はシーンEV では区別できない（同じ EV で順光にも逆光にもなる）。
+             白飛び判定のコントラスト目安に +2段する。露出計算そのものは変えない -->
+        <div class="field toggle-field" id="backlit-field">
+          <span class="field-label">逆光（空が明るい）</span>
+          <button type="button" class="toggle" id="backlit-toggle" role="switch" aria-checked="false" aria-label="逆光">
+            <span class="toggle-knob"></span></button>
+        </div>
         <div class="field toggle-field" id="tripod-field" hidden>
           <span class="field-label">三脚</span>
           <button type="button" class="toggle" id="tripod-toggle" role="switch" aria-checked="false" aria-label="三脚使用">
@@ -292,6 +299,7 @@
       <a href="#help-flash-basics">5 ストロボの基本</a>
       <a href="#help-daylight-sync">6 日中シンクロの手順</a>
       <a href="#help-sync-wall">7 同調速度の壁</a>
+      <a href="#help-blowout">7.5 空が飛ぶのを防ぐ</a>
       <a href="#help-slow-sync">8 スローシンクロの手順</a>
       <a href="#help-flash-duration">9 閃光時間</a>
       <a href="#help-power-mode">10 発光量を自分で決める</a>
@@ -489,6 +497,64 @@
         <p>実測とズレていたら調整してください。テスト撮影で「計算より1段暗い」なら基準損失を1段増やします。</p>
         <p class="note">HSS経路で「SS上限のため背景は −1.3段までです」と出た場合は、
         カメラの最速SSでは指定した背景段数に届かないという意味です。表示された段数までなら成立します。</p>
+      </section>
+
+      <section id="help-blowout">
+        <h3>7.5 空が飛ぶのを防ぐ — 適正露出でも飛びます</h3>
+        <h4>適正に合わせても空は飛ぶ</h4>
+        <p><strong>これがいちばん誤解されるところです。</strong> 被写体を適正露出にしても、空はしばしば飛びます。
+        露出計算が間違っているのではなく、<strong>シーンの明暗差がセンサーの記録できる幅を超えている</strong>からです。</p>
+        <p>センサーには「中間調から白飛びまでの余裕」があります。これを<strong>ヘッドルーム</strong>と呼びます。</p>
+        <table><tbody>
+          <tr><th>JPEG</th><td><strong>約3段</strong></td></tr>
+          <tr><th>RAW</th><td>3.5〜4段</td></tr>
+        </tbody></table>
+        <p>つまり、被写体を適正にしたとき、<strong>それより3段以上明るいものは白く塗り潰されます。</strong></p>
+        <p>快晴の逆光では空が被写体より 4.5段 ほど明るいので、
+        <strong>被写体を適正にした瞬間に空は 1.5段 オーバーして飛びます。</strong>
+        これは避けようがありません——<strong>背景段数を下げる以外に。</strong></p>
+        <h4>だから背景段数を下げる</h4>
+        <p>日中シンクロ（6）とスローシンクロ（8）では<strong>背景の明るさを選べます。</strong>
+        ここを下げれば空が記録範囲に入ります。</p>
+        <p class="note">空が飛ぶ可能性があります（快晴・順光・逆光の目安 4.5段）。<br>
+        背景 0段 → 1.5段オーバー／背景 −1段 → 0.5段オーバー／背景 −2段 → 空が残ります（推奨）。<br>
+        ※空を飛ばす表現を狙う場合はこの警告を無視してかまいません</p>
+        <p><strong>段数そのものではなく「選ぶべき背景段数」を出しています。</strong>
+        コントラストの目安は±1段の精度しかないので、「4.5段の差がある」と言われても判断できません。
+        「背景を −2段 にすれば残る」ならそのまま操作できます。</p>
+        <h4>「逆光」トグル</h4>
+        <p><strong>逆光かどうかはシーンEV では区別できません。</strong> 同じ「快晴」でも、順光と逆光で
+        空と被写体の明暗差は2段変わります。だからシーンとは別のトグルにしています。</p>
+        <table><tbody>
+          <tr><th>快晴・順光</th><td>2.5段</td></tr>
+          <tr><th>快晴・<strong>逆光</strong></th><td><strong>4.5段</strong></td></tr>
+          <tr><th>晴れ・薄曇り</th><td>2.0段</td></tr>
+          <tr><th>晴れ・薄曇り・<strong>逆光</strong>（＝被写体が日陰）</th><td><strong>4.0段</strong></td></tr>
+          <tr><th>曇り</th><td>1.5段</td></tr>
+          <tr><th>厚い曇り／日陰</th><td>1.0段</td></tr>
+          <tr><th>日没直後</th><td>2.0段</td></tr>
+        </tbody></table>
+        <p><strong>日中シンクロは逆光で使うことが多い</strong>ので、忘れずに入れてください。
+        入れないと警告が出ず、飛ばしてから気づくことになります。</p>
+        <h4>判定が出ないシーンがあります</h4>
+        <p>薄暮と屋内・夜間のシーンでは<strong>この警告を出しません。</strong></p>
+        <p>これらのシーンで最も明るい背景は、空ではなく<strong>光源そのもの</strong>（窓・街灯・空の残光）です。
+        被写体との差はシーンEV ではなく<strong>どう画角を切るか</strong>で決まるので、表では当てられません。
+        当てずっぽうの警告を出すより黙るほうが害が小さい、という判断です。</p>
+        <p>夜に窓や照明を背景に入れるときは、飛ぶ前提で構図を決めてください。</p>
+        <h4>背景を下げると壁が上がります</h4>
+        <p><strong>背景段数を下げると、日中シンクロでは同調速度の壁（7）が高くなります。</strong>
+        背景を1段暗くする＝SSを1段速める＝壁が1段上がる、という関係です。</p>
+        <p>壁が上がればND が増えるかHSS の損失が増え、<strong>ストロボが届かなくなることがあります。</strong>
+        そのためアプリは、推奨した背景段数が成立するかを確認しています。成立しないときはこう出ます。</p>
+        <p class="note">ただし背景 −2段 では光量が 1.5段 足りません（減光がその分増えるため）。
+        距離を詰めるか ISO を上げてください</p>
+        <p><strong>提案が別の問題に置き換わるだけなら、そう書きます。</strong></p>
+        <h4>ヘッドルームの調整</h4>
+        <p>設定タブの<strong>ハイライト余裕(段)</strong>で 2.0〜4.5 の範囲で変えられます。既定は 3.0（JPEG 相当）。</p>
+        <p>RAW で撮って現像で持ち上げるなら 3.5〜4.0 に。
+        「警告が出るのに実際は飛んでいない」なら上げ、「警告が出ないのに飛ぶ」なら下げてください。</p>
+        <p><strong>コントラスト目安もヘッドルームも±1段程度の目安です。</strong> 断定ではありません。</p>
       </section>
 
       <section id="help-slow-sync">

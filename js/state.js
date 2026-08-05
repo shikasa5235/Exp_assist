@@ -7,7 +7,7 @@
 
 import {
   MODIFIERS, BASE_ISO_DEFAULT, EXPANDED_ISO_MIN_DEFAULT,
-  BLACK_MIST_STOPS, K_DEFAULT, HSS_BASE_LOSS_DEFAULT,
+  BLACK_MIST_STOPS, K_DEFAULT, HSS_BASE_LOSS_DEFAULT, HIGHLIGHT_HEADROOM_DEFAULT,
 } from './scenes.js';
 
 /** @typedef {Object} AppState アプリの単一状態（UI仕様 §9 の形） */
@@ -34,13 +34,18 @@ export const defaultState = {
   camera: {
     syncSpeed: 1 / 250, maxSS: 1 / 8000, isoMin: BASE_ISO_DEFAULT, isoMax: 6400, isStops: 0,
     expandedISOMin: EXPANDED_ISO_MIN_DEFAULT, allowExpandedIso: false,
+    // 中間調から飽和までの余裕（段）。白飛び判定に使う。JPEG 約3段／RAW 3.5〜4段。
+    // **項目の追加なので既定値マージで吸収され、schemaVersion は上げない**（§9）。
+    highlightHeadroomStops: HIGHLIGHT_HEADROOM_DEFAULT,
   },
   lens: { fMin: 2.8, fMax: 22 },
   // powerMode: 'auto' = 発光量を計算で決める（従属変数）／'fixed' = ユーザーが選び「距離」を解く。
   // powerStops は fixed のときだけ使う（0=1/1 … 7=1/128。大きいほど弱い）。
+  // backlit: 逆光か。**シーンEV では区別できない**（同じ EV で順光にも逆光にもなる）ので
+  // 撮影ごとの入力として持つ。白飛び判定のコントラスト目安に +BACKLIT_EXTRA_STOPS する。
   flash: {
     profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: -1,
-    useHSS: true, tripod: false, curtain: false,
+    useHSS: true, tripod: false, curtain: false, backlit: false,
     powerMode: 'auto', powerStops: 5,
   },
   nd: [],
