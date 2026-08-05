@@ -55,10 +55,10 @@
 
   <script type="module">
     import { F, SS, ISO, snap } from './js/stops.js';
-    import { solveSS, solveN, solveISO, evTarget, handShakeLimit } from './js/exposure.js';
+    import { solveSS, solveN, solveISO, handShakeLimit } from './js/exposure.js';
     import { solveND } from './js/filters.js';
     import {
-      gnBase, applyModifier, applyIso, effectiveGN, reachDistance,
+      gnBase, applyModifier, applyIso, effectiveGN,
       calibrate, hssLoss, overStops, resolvePower, flashDuration,
     } from './js/flash.js';
     import {
@@ -68,6 +68,8 @@
     import { SUBJECTS, POWER_STEPS, HELP } from './js/scenes.js';
     import { compute } from './js/compute.js';
     import { makeState, migrate, mergeDeep, clampPanelSize } from './js/state.js';
+    // wheel.js から純粋関数だけを取る（makeWheel は DOM を作るのでここでは使わない）
+    import { indexFromDrag } from './js/wheel.js';
 
     // ---- 判定ヘルパー -------------------------------------------------------
     const rel = (a, b, tol = 0.01) => Math.abs(a - b) <= Math.abs(b) * tol + 1e-9;
@@ -801,6 +803,37 @@
           + ` / ずれる例=${isTheTrickyCase} / ${w.message}`,
         pass: labelMatches && powerMatches && gone && asPromised && isTheTrickyCase,
       };
+    });
+
+    // ===== ホイールのドラッグ量→インデックス（ジェスチャ境界の保険）================
+    // 実機で「横スワイプ中に縦スクロールが挟まるとダイアルが飛ぶ」不具合が出た。
+    // 原因は pointercancel が確定処理に繋がっていたことだが、同じ形のバグを防ぐため
+    // 位置の計算を純粋関数に切り出した。**引数がこの4つだけなら累積の誤りが起こり得ない。**
+    const STEP_PX = 26; // js/wheel.js の STEP と同じ（CSS の --wheel-step）
+    add('D1', 'ホイール: 移動量が 1/3段の 2.4倍 → 開始位置 +2（四捨五入）', () => {
+      const got = indexFromDrag(5, 2.4 * STEP_PX, STEP_PX, 40);
+      return { expected: '7', actual: String(got), pass: got === 7 };
+    });
+    add('D2', 'ホイール: 同じ移動量を10回に分けて渡しても結果が同じ（累積を持たない）', () => {
+      const total = 2.4 * STEP_PX;
+      const once = indexFromDrag(5, total, STEP_PX, 40);
+      // pointermove が細かく飛んでくる状況を再現する。関数は毎回「開始点からの総量」を受け取る
+      let running = 0, last = null;
+      for (let i = 0; i < 10; i++) {
+        running += total / 10;
+        last = indexFromDrag(5, running, STEP_PX, 40);
+      }
+      return {
+        expected: `一括 ${once} と分割 ${once} が一致`,
+        actual: `一括 ${once} / 分割 ${last}`,
+        pass: once === last && once === 7,
+      };
+    });
+    add('D3', 'ホイール: 範囲外は 0..len-1 にクランプされる', () => {
+      const lo = indexFromDrag(2, -99 * STEP_PX, STEP_PX, 40);   // 下へ振り切る
+      const hi = indexFromDrag(2, 99 * STEP_PX, STEP_PX, 40);    // 上へ振り切る
+      const ok = lo === 0 && hi === 39;
+      return { expected: '0 / 39', actual: `${lo} / ${hi}`, pass: ok };
     });
 
     add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {

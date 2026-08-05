@@ -156,7 +156,9 @@
         <div class="field">
           <label class="field-label" for="flash-profile">プロファイル</label>
           <select class="select" id="flash-profile"></select>
-          <span class="badge badge-est" id="uncalibrated-badge" hidden>推定値（未校正）</span>
+          <!-- 押すと校正のしかた（マニュアル §12）を開く。data-help は警告の ? と同じ委譲で処理 -->
+          <button type="button" class="badge badge-est badge-link" id="uncalibrated-badge"
+                  data-help="help-calibration" aria-label="推定値（未校正）。校正のしかたを開く" hidden>推定値（未校正）</button>
         </div>
         <div class="field">
           <label class="field-label" for="flash-modifier">モディファイア</label>
@@ -226,8 +228,13 @@
             aria-label="結果パネルの高さを変える（上下スワイプで3段階、タップで標準）">
       <span class="panel-grip" aria-hidden="true"></span>
     </button>
-    <!-- 最小表示のときだけ出る1行（CSS で出し分け） -->
-    <div class="result-summary" id="result-summary" aria-live="polite"></div>
+    <!-- 読み上げ用の唯一のライブリージョン（UI仕様 §13）。
+         結果の各コンテナに aria-live を付けると、微調整スライダーを動かすたびにカード全文が
+         読まれて使えない。ここに「主案の数値＋警告の件数」だけを、操作が落ち着いてから
+         一度だけ入れる（js/ui.js の announceResult）。視覚的には見えない。 -->
+    <div class="sr-only" id="result-announce" role="status" aria-atomic="true"></div>
+    <!-- 最小表示のときだけ出る1行（CSS で出し分け）。読み上げは上の1箇所に集約 -->
+    <div class="result-summary" id="result-summary"></div>
     <div class="result-head">
       <div class="wall-readout" id="wall-readout" hidden>
         <span class="wall-label">同調速度の壁</span><span class="wall-num" id="wall-num">–</span>
@@ -235,9 +242,12 @@
       <div class="result-badges" id="result-badges"></div>
     </div>
     <div class="ev-ruler" id="ev-ruler" aria-hidden="false"><!-- EVルーラー＋トラック --></div>
-    <div class="result-systems" id="result-systems" aria-live="polite"><!-- アンビエント／ストロボ --></div>
+    <div class="result-systems" id="result-systems"><!-- アンビエント／ストロボ --></div>
     <div class="path-compare" id="path-compare" hidden></div>
-    <div class="warnings" id="warnings" role="status"></div>
+    <!-- コンテナ自体はライブリージョンにしない。role は警告1件ごとに付ける
+         （alert だけ role="alert"、info/warn は role="status"）。入れ子のライブリージョンは
+         二重発話になるため、ここに role="status" を置かないこと。 -->
+    <div class="warnings" id="warnings"></div>
   </section>
 
   <!-- ===== トースト（クランプ通知など）===== -->

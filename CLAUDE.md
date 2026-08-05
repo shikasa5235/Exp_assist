@@ -25,7 +25,8 @@
 仕様書は判断が必要な点をすべて確定済み。**質問せず通しで実装してよい。**
 仕様間の矛盾か、物理的に実装不能な記述を見つけたときだけ確認すること。
 
-未確定なのはアプリ名のみ→既定値「設定アシスト」で決定しました。
+未確定だったアプリ名は**「露出アシスト」**で確定（`manifest.webmanifest` の `name` / `short_name`）。
+実機で確定した既定値の上書きは `js/state.js` 冒頭のコメントを参照。
 
 ---
 
@@ -60,30 +61,42 @@
 - タップ対象は 44×44px 以上、間隔 8px 以上
 - 絵文字をアイコンとして使わない。インライン SVG の `<symbol>` を自前で定義する
 - コンポーネント内に生の hex を書かない。CSS カスタムプロパティ経由のみ
-- `--flash` トークンはストロボ系統の識別にのみ使う
+- `--flash` トークンはストロボ系統の識別にのみ使う。UI 全体の強調色は `--accent`
+  （初期値は同値。ストロボの色を変えてもフォーカスリングまで変わらないよう分離してある）
 - ライトとダークのコントラストは**それぞれ実測**する。片方から推測しない
-- `transform` と `opacity` 以外をアニメーションさせない
+- **連続的・スクロール駆動のアニメーションは `transform` と `opacity` に限る**
+  （レイアウトとペイントを避ける）。離散操作による一度きりの遷移では、ペイントのみの
+  プロパティ（`background-color` / `border-color` / `box-shadow`）を使ってよい。
+  レイアウトを動かすプロパティ（`height` / `max-height` / `width` / `margin`）は、
+  **実機で滞りがないことを確認し MAINTENANCE.md §12 に記録した場合のみ**
 
 ---
 
 ## アーキテクチャ
 
 ```
-js/stops.js  exposure.js  flash.js  filters.js  advisor.js   ← 純粋関数のみ
+js/stops.js  exposure.js  flash.js  filters.js  advisor.js  scenes.js   ← 純粋関数・定数のみ
                           │
-                       compute()
+                   js/compute.js（compute(state) → derived）            ← 純粋。束ねる層
                           │
 state ──▶ compute(state) ──▶ derived ──▶ render(state, derived) ──▶ DOM
-  ▲                                                                 │
+  ▲            ▲                              │                       │
+  │       js/state.js（既定値・migrate）  js/wheel.js（DOM部品）        │
   └───────────── setState(patch) ◀───── イベントハンドラ ◀───────────┘
+                     │
+              js/storage.js（永続化。setState の直後1箇所）
 ```
 
-- 計算モジュール（`stops` / `exposure` / `flash` / `filters` / `advisor`）は**副作用ゼロ**。
-  DOM にも `localStorage` にも `window` にも触らない
+- 計算モジュール（`stops` / `exposure` / `flash` / `filters` / `advisor` / `compute` / `scenes` / `state`）は
+  **副作用ゼロ**。DOM にも `localStorage` にも `window` にも触らない
+- **意図別ロジック・警告の組み立ては `compute.js`。** `advisor.js` は単発の判定と文言整形を持つ。
+  タブによる分岐は `compute()` の入口の1箇所だけに置く
 - `ui.js` に計算を書かない。`compute()` の結果を描画するだけ
+- `wheel.js` は状態を持たない DOM 部品。操作用（計算タブ）と表示用（結果パネル）で共有する
 - **DOM を状態の保管場所にしない。** `element.value` を読んで判断しない。必ず `state` を見る
 - 再描画経路は `setState` の一本だけ。他に作らない
-- 永続化は `setState` の直後に1箇所で行う
+- 永続化は `setState` の直後に1箇所で行う（アプリ状態 `expo-state-v1` と
+  一度きりのフラグ `expo-flags-v1` は別キー。詳細は MAINTENANCE.md §9）
 
 ---
 
@@ -95,7 +108,8 @@ state ──▶ compute(state) ──▶ derived ──▶ render(state, derived
 2. `exposure.js` — アンビエントのソルバー → テスト #1〜#9
 3. `filters.js` — ND の組み合わせ探索 → テスト #15〜#18
 4. `flash.js` — Ws→GN・校正・HSS・閃光時間 → テスト #10〜#14
-5. `advisor.js` — 意図別ロジック・警告・代替案 → テスト #19〜#29
+5. `advisor.js` — 単発の判定・文言整形・日中シンクロの経路計算 → テスト #19〜#29
+5b. `compute.js` — 意図別ロジック・警告の組み立て・タブ分岐 → 末尾 c のテスト（#24c 等）
 6. **ここで `tests.html` が全緑になることを確認する**
 7. `index.html` の骨格＋ CSS トークン＋ SVG シンボル
 8. コンポーネント（ホイールピッカー → チップ → タイル → 結果パネル → EV ルーラー）
@@ -146,7 +160,11 @@ open http://localhost:8000/tests.html
 
 ## 完了の定義
 
-- `tests.html` が全緑（31 ケース）
+- **受け入れテストが全件緑**（`tests.html` の最上部が `全 N 件中 N 件成功` になる）。
+  **ここに件数を書かない。** 仕様 §12 の 31 ケースに、compute 経由の統合テストと
+  実機で見つかった不具合の再発防止ケースが継ぎ足されていくので、数値を書くと必ず古くなる。
+  「いま何件か」は `tests.html` を開けば分かる
+- 検証ツール3本（`check-modules` / `check-sw-assets` / `check-help-anchors`）が exit 0
 - UI 仕様書 §16 のチェックリストを全項目自己検証し、結果を報告済み
 - 機内モードで全機能が動く。DevTools の Network に外部ドメインへのリクエストが1件も無い
 - 320 / 375 / 430 / 768px と横向きで崩れない

@@ -106,6 +106,18 @@ export const HELP = Object.freeze({
   ok: 'help-warnings',
 });
 
+/**
+ * 警告以外の UI 要素から開くマニュアルのセクション。
+ *
+ * **`HELP` と分けている理由：** テスト #33 は「`HELP` の全値がいずれかの警告から発生する」ことを
+ * 検証する。警告ではない導線（バッジなど）を `HELP` に足すと #33 が永久に赤くなる。
+ * ただし ID 文字列を実装に直書きしないという規則は同じなので、置き場所だけ分ける。
+ * @type {Readonly<Record<string,string>>}
+ */
+export const HELP_LINKS = Object.freeze({
+  calibration: 'help-calibration',
+});
+
 /** APEX の基準 ISO。EV 換算の分母。 */
 export const ISO_REF = 100;
 

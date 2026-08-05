@@ -75,9 +75,14 @@ Claude Code 向け。**この文書だけで最後まで実装できるよう、
 └─ icons/
     ├─ icon-192.png
     ├─ icon-512.png
-    ├─ icon-maskable-512.png  セーフゾーン内に収めた maskable 版
-    └─ apple-touch-icon.png   180×180
+    ├─ icon-maskable.png      512×512。セーフゾーン（中央58%）内に収めた maskable 版
+    ├─ apple-touch-icon.png   180×180
+    ├─ icon.svg               png の生成元（配信しない。ASSETS に入れない）
+    └─ icon-maskable.svg      同上
 ```
+
+このほかに `tools/`（検証スクリプト3本）・`docs/`・`.nojekyll` がある。いずれもアプリの実行に
+不要なので `sw.js` の `ASSETS` には入れない（意図的な除外。MAINTENANCE.md §6.2）。
 
 **`stops.js` / `exposure.js` / `flash.js` / `filters.js` / `advisor.js` / `compute.js` / `scenes.js` / `state.js`
 は副作用ゼロの純粋関数・定数のみ。** DOM にも localStorage にも触らせない。

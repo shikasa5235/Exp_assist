@@ -10,7 +10,10 @@
 
 import { compute } from './compute.js';
 import { formatStops } from './advisor.js';
-import { SCENES, SUBJECTS, MODIFIERS, POWER_STEPS } from './scenes.js';
+import {
+  SCENES, SUBJECTS, MODIFIERS, POWER_STEPS,
+  K_MIN, K_MAX, HSS_BASE_LOSS_MIN, HSS_BASE_LOSS_MAX, BLACK_MIST_STOPS_MAX,
+} from './scenes.js';
 import { F, SS, ISO } from './stops.js';
 import { calibrate } from './flash.js';
 import { makeWheel } from './wheel.js';
@@ -70,6 +73,7 @@ function cacheElements() {
     'flash-modifier', 'distance-chips', 'ambient-chips', 'tripod-field', 'tripod-toggle',
     'curtain-field', 'curtain-toggle', 'result-panel', 'wall-readout', 'wall-num',
     'result-badges', 'ev-ruler', 'result-systems', 'path-compare', 'warnings', 'toast',
+    'result-announce',
     'calc-ev', 'calc-ev-err', 'calc-nd-chips', 'calc-tracks', 'equiv-list', 'settings-root',
     'power-chips', 'power-hint', 'panel-handle', 'result-summary',
     'manual', 'manual-open', 'manual-close', 'manual-index', 'manual-body', 'manual-tray-toggle',
@@ -93,7 +97,29 @@ export function setState(patch, { persist = true } = {}) {
   state = mergeDeep(state, patch);
   derived = compute(state);
   render();
-  if (persist) storage.save(state);
+  // 保存できない環境（プライベートブラウズ等）では黙って落とさず1度だけ知らせる。
+  // 計算機能は保存に依存しないので続行する（UI仕様 §12 の文言）。
+  if (persist && !storage.save(state)) warnStorageOnce();
+}
+
+/**
+ * `[data-help]` を押されたらそのセクションを開く。警告の ? とバッジで共有する唯一の実装。
+ * @param {Event} e クリックイベント
+ * @returns {boolean} 開いたか（呼び出し側が「他の処理へ進むか」を判断できるように返す）
+ */
+function openHelpFrom(e) {
+  const b = e.target.closest('[data-help]');
+  if (!b) return false;
+  setState({ ui: { manual: b.dataset.help } });
+  return true;
+}
+
+/** localStorage に書けないことを1セッション1回だけ通知する。連打で鳴り続けさせない。 */
+let storageWarned = false;
+function warnStorageOnce() {
+  if (storageWarned) return;
+  storageWarned = true;
+  toast('設定を保存できません。プライベートブラウズを解除すると保存されます。計算はこのまま使えます');
 }
 
 /** 段数を「+0.3段／0.0段／−1.7段」の人間可読形へ（aria-valuetext・微調整ラベル用）。 */
@@ -276,7 +302,12 @@ function wirePanelHandle() {
     moved = true;              // 1回のスワイプで1段階だけ動かす
     step(dy < 0 ? 1 : -1);     // 上（dy<0）で大きく、下で小さく
   }, { passive: true });
+  // touchend と touchcancel の両方で状態を捨てる（MAINTENANCE.md §4「タッチのジェスチャ境界」）。
+  // cancel を落とすと moved が true のまま残り、次のタップが「スワイプ直後」と誤判定されて
+  // 無視される。値は確定しない——キャンセルは中断なので、段階は動かさない。
+  const dropPanelSwipe = () => { startY = null; moved = false; };
   el.panelHandle.addEventListener('touchend', () => { startY = null; }, { passive: true });
+  el.panelHandle.addEventListener('touchcancel', dropPanelSwipe, { passive: true });
   // タップは標準へ戻す。スワイプで動かした直後は反応させない
   el.panelHandle.addEventListener('click', () => {
     if (moved) { moved = false; return; }
@@ -312,12 +343,15 @@ function wireManual() {
   el.manualTrayToggle.addEventListener('click', () => setState({ ui: { manualTray: !state.ui.manualTray } }));
   // 警告の ? → 該当セクションを開く（イベント委譲。再描画で作り直されるため）
   el.warnings.addEventListener('click', (e) => {
-    const b = e.target.closest('[data-help]');
-    if (b) { setState({ ui: { manual: b.dataset.help } }); return; }
+    if (openHelpFrom(e)) return;
     // 警告内の解決ボタン（いまは発光量の上限を上げる1種類）。再描画で作り直されるので委譲。
     const a = e.target.closest('[data-action="raiseCeiling"]');
     if (a) raiseCeiling(Number(a.dataset.to));
   });
+  // バッジ（推定値／未校正）も同じ委譲で校正のしかたへ飛ばす。
+  // 結果パネルのバッジは再描画で作り直されるので委譲、ストロボパネルのバッジは静的だが同じ経路に乗せる。
+  el.resultBadges.addEventListener('click', openHelpFrom);
+  el.uncalibratedBadge.addEventListener('click', openHelpFrom);
   // 目次はページ内リンク。履歴を汚さずスクロールだけする。ジャンプ後もトレイは開いたまま（§0.4）
   el.manualIndex.addEventListener('click', (e) => {
     const a = e.target.closest('a[href^="#"]');
@@ -342,8 +376,12 @@ function wireManual() {
   let touch = null;
   el.manual.addEventListener('touchstart', (e) => {
     const t = e.touches[0];
+    // 開始時に必ず作り直す。前のジェスチャの残骸を継続扱いしない
     touch = { x: t.clientX, y: t.clientY, atTop: el.manualBody.scrollTop <= 0 };
   }, { passive: true });
+  // キャンセルは中断。トレイ開閉もシート閉じも行わず状態だけ捨てる
+  // （MAINTENANCE.md §4「タッチのジェスチャ境界」）。
+  el.manual.addEventListener('touchcancel', () => { touch = null; }, { passive: true });
   el.manual.addEventListener('touchend', (e) => {
     if (!touch) return;
     const t = e.changedTouches[0];
@@ -586,12 +624,17 @@ function renderResult() {
   const s = d.summary;
   el.resultSummary.innerHTML = `<span class="sum-values">${s.text}</span>`
     + (s.icon ? `<svg class="icon ${s.level}" aria-hidden="true"><use href="#i-${s.icon}"></use></svg>` : '');
+  announceResult(d);
   // derived を描くだけ。タブは見ない（何を映すかは compute() の入口で解決済み）。
   // 同調速度の壁
   if (d.wall) { el.wallReadout.hidden = false; el.wallNum.textContent = d.wall.text; }
   else { el.wallReadout.hidden = true; }
   // バッジ
-  el.resultBadges.innerHTML = d.badges.map((b) => `<span class="badge badge-est">${b.text}</span>`).join('');
+  // helpId を持つバッジは押せる（警告の ? と同じ委譲で開く）。持たないものは静的な span のまま
+  el.resultBadges.innerHTML = d.badges.map((b) => (b.helpId
+    ? `<button type="button" class="badge badge-est badge-link" data-help="${b.helpId}"
+         aria-label="${b.text}。校正のしかたを開く">${b.text}</button>`
+    : `<span class="badge badge-est">${b.text}</span>`)).join('');
   // EV ルーラーは renderRuler() が永続DOMを更新（ここでは触らない）
   // 系統（アンビエント／ストロボ）
   el.resultSystems.className = 'result-systems' + (d.flash ? ' dual' : '');
@@ -784,6 +827,9 @@ function renderCalc() {
 }
 
 function equivHtml(rows) {
+  // **この分岐は現在到達しない。** compute.equivalentList は EQUIV_F_INDEXES の3行を必ず返し、
+  // 成立しない行は消さずに disabled + 理由付きで残す（位置が安定するほうが現場で読める）。
+  // 意図的に残す理由：UI仕様 §12 が定める文言であり、一覧を可変にしたら即座に必要になる。
   if (!rows || !rows.length) {
     return '<div class="equiv-empty">この条件で成立する組み合わせがありません。ISO上限を上げるか、F値の範囲を広げてください</div>';
   }
@@ -812,10 +858,10 @@ const FLAT_SETTINGS = [
   { group: 0, path: 'settings.comp', label: '露出補正(段)', kind: 'num', min: -5, max: 5 },
   { group: 0, path: 'camera.maxSS', label: 'SS上限 (1/x秒)', kind: 'recip', min: 60, max: 16000 },
   { group: 0, path: 'camera.syncSpeed', label: '同調速度 (1/x秒)', kind: 'recip', min: 30, max: 500 },
-  { group: 2, path: 'settings.hssBaseLoss', label: 'HSS基準損失(段)', kind: 'num', min: 1, max: 2.5 },
+  { group: 2, path: 'settings.hssBaseLoss', label: 'HSS基準損失(段)', kind: 'num', min: HSS_BASE_LOSS_MIN, max: HSS_BASE_LOSS_MAX },
   { group: 2, path: 'settings.ambientOffsetDefault', label: '既定アンビエント段数', kind: 'num', min: -3, max: 1 },
   // ブラックミストは公称ほぼ減光なし。実測で微小な減光がある場合に備えて調整可
-  { group: 2, path: 'settings.blackMistStops', label: 'ブラックミスト減光(段)', kind: 'num', min: 0, max: 1 / 3 },
+  { group: 2, path: 'settings.blackMistStops', label: 'ブラックミスト減光(段)', kind: 'num', min: 0, max: BLACK_MIST_STOPS_MAX },
 ];
 const OWNED_ND_ALL = [1, 2, 3, 4];
 
@@ -922,7 +968,7 @@ function onProfileChange(e, i) {
   const raw = parseFloat(String(t.value).replace(/[^\d.]/g, ''));
   if (Number.isNaN(raw)) { renderSettings(); return; }
   if (f === 'ws') updateProfile(i, { ws: clamp(Math.round(raw), 10, 2000) });
-  else if (f === 'k') updateProfile(i, { k: clamp(raw, 2.0, 6.0) });
+  else if (f === 'k') updateProfile(i, { k: clamp(raw, K_MIN, K_MAX) });
   // 発光量はドロップダウン（値は段数そのもの）。上限が下限より弱い組み合わせは成立しないので揃える
   else if (f === 'minPower') {
     const minPowerStops = clamp(Math.round(raw), 0, 7);
@@ -1006,7 +1052,7 @@ function runCalibration(form, i) {
       powerStops: clamp(powerStops, 0, 10),
     });
     if (!Number.isFinite(k)) throw new Error('k を計算できません');
-    const kClamped = clamp(k, 2.0, 6.0);
+    const kClamped = clamp(k, K_MIN, K_MAX);
 
     // 実測 k はモディファイアごとに保存する（切り替えても正確なまま／未校正の組み合わせはバッジが出る）
     updateProfile(i, { cal: { ...(state.profiles[i].cal || {}), [mod]: kClamped } });
@@ -1156,10 +1202,52 @@ function warnHtml(w) {
   const act = w.action
     ? `<button type="button" class="warn-action" data-action="${w.action.kind}" data-to="${w.action.to}">${w.action.label}</button>`
     : '';
-  return `<div class="warn-item ${w.level}">
+  // UI仕様 §13：alert だけ role="alert"（割り込んで読む）、info/warn は role="status"。
+  // **コンテナ側にライブリージョンを置かないこと。**入れ子にすると二重発話になる。
+  // 数値の読み上げは #result-announce に集約してあるので、ここは1件ごとの意味付けだけを担う。
+  const role = w.level === 'alert' ? 'alert' : 'status';
+  return `<div class="warn-item ${w.level}" role="${role}">
     <svg class="icon" aria-hidden="true"><use href="#i-${w.icon}"></use></svg>
     <span>${w.message}</span>${help}${act}
   </div>`;
+}
+
+/* ---- 読み上げ（UI仕様 §13）-------------------------------------------- */
+
+/**
+ * 読み上げを待つ時間(ms)。**この値の根拠：**
+ *
+ * 連続変更を起こす入力はシーン微調整スライダーだけで、ドラッグ中は `input` が
+ * 数十ms間隔で飛ぶ（1/3段ごとに `setState`）。指を動かし続けている限り次の描画が来るので、
+ * **「ドラッグ中の最も遅い刻み間隔」より長く、「指を離してから読み始まるまでの待ちが
+ * 気にならない長さ」より短い**必要がある。
+ *
+ * - 150ms（`--dur-slide`）では刻みの合間に発火して連続発話が残る
+ * - 1000ms では操作と読み上げが結びつかず、押し間違いに気づけない
+ *
+ * 400ms を採る。ホイールやチップは離した瞬間に1回しか描画しないので、この待ちは
+ * 「読み始めが 0.4秒遅れる」だけの意味しか持たない。
+ */
+const ANNOUNCE_DELAY_MS = 400;
+let announceTimer = null;
+
+/**
+ * 結果を読み上げ用リージョンへ入れる。**操作が落ち着いてから一度だけ。**
+ * 読ませるのは主案の数値と警告の件数だけ（カード全文は長すぎて使えない）。
+ * @param {object} d derived
+ */
+function announceResult(d) {
+  if (!el.resultAnnounce) return;
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => {
+    const ws = d.warnings || [];
+    const alerts = ws.filter((w) => w.level === 'alert').length;
+    // 「この設定で撮れます」1件だけのときは件数を言わない（無い問題を数えない）
+    const only = ws.length === 1 && ws[0].level === 'info';
+    const tail = only ? ws[0].message
+      : `警告 ${ws.length}件${alerts ? `（要対応 ${alerts}件）` : ''}`;
+    el.resultAnnounce.textContent = `${d.summary.text}。${tail}`;
+  }, ANNOUNCE_DELAY_MS);
 }
 
 /* ---- トースト --------------------------------------------------------- */

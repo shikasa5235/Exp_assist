@@ -1,7 +1,12 @@
 /* ===================================================================
    露出アシスト — 全スタイル。トークンは CSS カスタムプロパティで定義。
    コンポーネント内に生の hex を書かない（すべてトークン経由）。
-   アニメーションは transform / opacity のみ。
+
+   アニメーション（UI仕様 §8）：
+     連続的・スクロール駆動 … transform / opacity のみ
+     離散操作の一度きり     … ペイントのみのプロパティ（background-color 等）も可
+     レイアウトを動かすもの … 実機確認済みで MAINTENANCE.md §12 に記録した場合のみ
+                              （現在の例外は .result-panel の max-height 1件）
    =================================================================== */
 
 /* ---- カラートークン（UI仕様 §4）------------------------------------ */
@@ -15,6 +20,15 @@
   --warn:   #7A4C00;
   --alert:  #96131A;
   --flash:  #14448F;
+  /* --accent は UI 全体の強調色（選択・フォーカス・主ボタン）。**--flash とは別の意味。**
+     初期値は --flash と同値だが、ストロボ系統の色を変えたときにフォーカスリングまで
+     変わらないよう分離してある。ストロボの識別に --accent を使わないこと（逆も同じ）。 */
+  --accent: #14448F;
+  /* --accent を背景に敷いた上に載る文字・アイコンの色（更新バー・主ボタン）。
+     両テーマで白のままだが、生の #fff をコンポーネントに書かないためトークンにする。 */
+  --on-accent: #FFFFFF;
+  /* --on-accent の上に重ねる面（更新バーの［更新］ボタン）。--press とは別物 */
+  --on-accent-fill: rgba(255,255,255,.2);
   --overlay: rgba(14,18,22,.45);
   --press:  rgba(14,18,22,.06);
   --sel:    rgba(20,68,143,.10);
@@ -29,6 +43,10 @@
   --warn:   #E0A73C;
   --alert:  #FF6B6B;
   --flash:  #6BA6FF;
+  --accent: #6BA6FF;
+  /* ダークでもアクセントは中明度の青なので、上に載せる文字は白のままが読みやすい */
+  --on-accent: #FFFFFF;
+  --on-accent-fill: rgba(255,255,255,.2);
   --overlay: rgba(0,0,0,.6);
   --press:  rgba(255,255,255,.08);
   --sel:    rgba(107,166,255,.14);
@@ -36,7 +54,9 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     --paper:  #0B0F12; --panel:  #151B21; --ink: #EAF0F5; --ink-2: #97A5B1;
-    --rule: #2A343D; --ok: #4FCFA8; --warn: #E0A73C; --alert: #FF6B6B; --flash: #6BA6FF;
+    --rule: #2A343D; --ok: #4FCFA8; --warn: #E0A73C; --alert: #FF6B6B;
+    --flash: #6BA6FF; --accent: #6BA6FF;
+    --on-accent: #FFFFFF; --on-accent-fill: rgba(255,255,255,.2);
     --overlay: rgba(0,0,0,.6); --press: rgba(255,255,255,.08); --sel: rgba(107,166,255,.14);
   }
 }
@@ -50,6 +70,9 @@
   --r-pill: 999px;
   --tap-min: 44px;
   --gap-tap: 8px;
+  /* --icon-xs は本文に混ぜるアイコン（警告行・最小表示の1行）。16px では小さく 24px では
+     行を膨らませるため 18px。生の 18px を2箇所に書いていたのでトークンにした */
+  --icon-xs: 18px;
   --icon-sm: 16px;
   --icon-md: 24px;
   --header-h: 52px;
@@ -82,7 +105,13 @@ body {
   flex-direction: column;
 }
 button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
-:focus-visible { outline: 2px solid var(--flash); outline-offset: 2px; border-radius: 4px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+/* 読み上げ専用（視覚的に隠すがアクセシビリティツリーに残す）。
+   display:none や visibility:hidden はツリーから外れて読まれないので使えない。 */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; border: 0; padding: 0; margin: -1px;
+}
 .icon { width: var(--icon-md); height: var(--icon-md); display: inline-block; flex: none; }
 .icon.sm { width: var(--icon-sm); height: var(--icon-sm); }
 .tabular { font-variant-numeric: tabular-nums; }
@@ -92,11 +121,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 8px 16px; padding-top: calc(8px + var(--sat));
-  background: var(--flash); color: #fff; font-size: 13px;
+  background: var(--accent); color: var(--on-accent); font-size: 13px;
 }
 .update-apply {
   min-height: 32px; padding: 0 16px; border-radius: var(--r-pill);
-  background: rgba(255,255,255,.2); color: #fff; font-weight: 600;
+  background: var(--on-accent-fill); color: var(--on-accent); font-weight: 600;
 }
 
 /* ===== ヘッダー =================================================== */
@@ -118,7 +147,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .tab .icon { width: 20px; height: 20px; }
 .tab[aria-selected="true"] { color: var(--ink); background: var(--sel); }
 .tab:active { background: var(--press); }
-.header-right { display: flex; align-items: center; gap: 6px; }
+/* 44px のアイコンボタンが並ぶので gap は --gap-tap（8px）を使う。6px では §7 の
+   「隣接するタップ対象の間隔は 8px 以上」を満たさない */
+.header-right { display: flex; align-items: center; gap: var(--gap-tap); }
 .ev-readout { display: flex; align-items: baseline; gap: 4px; }
 .ev-label { font-size: 12px; font-weight: 600; letter-spacing: .04em; color: var(--ink-2); }
 .ev-num { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 20px; font-weight: 600; }
@@ -145,7 +176,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   margin-bottom: 8px;
 }
 .field-value { margin-left: auto; font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--ink); }
-.field-error { color: var(--alert); font-size: 12px; margin-top: 6px; min-height: 0; }
+.field-error { color: var(--alert); font-size: 12px; margin-top: 8px; min-height: 0; }
 .field-error:empty { margin-top: 0; }
 
 /* ---- タイル（シーン）--------------------------------------------- */
@@ -163,7 +194,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .tile .tile-ev { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 700; }
 .tile .tile-name { font-size: 11px; line-height: 1.25; color: var(--ink-2); }
-.tile[aria-checked="true"] { border-color: var(--flash); background: var(--sel); }
+.tile[aria-checked="true"] { border-color: var(--accent); background: var(--sel); }
 .tile[aria-checked="true"] .tile-name { color: var(--ink); }
 .tile:active { background: var(--press); }
 
@@ -176,8 +207,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   transition: background var(--dur-slide) var(--ease), border-color var(--dur-slide) var(--ease);
 }
 .chip:active { background: var(--press); }
-.chip[aria-checked="true"] { border-color: var(--flash); background: var(--sel); font-weight: 600; }
-.chip.chip-nd[aria-checked="true"] { border-color: var(--flash); }
+.chip[aria-checked="true"] { border-color: var(--accent); background: var(--sel); font-weight: 600; }
+.chip.chip-nd[aria-checked="true"] { border-color: var(--accent); }
 /* ND と光学フィルター（ブラックミスト）の境界。減光しないので破線で性質の違いを示す */
 .chip-sep { flex: none; width: 1px; align-self: stretch; background: var(--rule); margin: 4px 2px; }
 .chip.chip-optical { border-style: dashed; }
@@ -191,9 +222,9 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .slider::-moz-range-track { height: 4px; background: var(--rule); border-radius: 2px; }
 .slider::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none; width: 28px; height: 28px; margin-top: -12px;
-  border-radius: 50%; background: var(--panel); border: 2px solid var(--flash);
+  border-radius: 50%; background: var(--panel); border: 2px solid var(--accent);
 }
-.slider::-moz-range-thumb { width: 28px; height: 28px; border-radius: 50%; background: var(--panel); border: 2px solid var(--flash); }
+.slider::-moz-range-thumb { width: 28px; height: 28px; border-radius: 50%; background: var(--panel); border: 2px solid var(--accent); }
 .slider-scale { display: flex; justify-content: space-between; font-size: 11px; color: var(--ink-2); margin-top: -2px; }
 
 /* ---- セレクト・入力 ---------------------------------------------- */
@@ -216,7 +247,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   position: relative; width: 52px; height: 32px; border-radius: var(--r-pill);
   background: var(--rule); transition: background var(--dur-slide) var(--ease);
 }
-.toggle[aria-checked="true"] { background: var(--flash); }
+.toggle[aria-checked="true"] { background: var(--accent); }
 .toggle-knob {
   position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 50%;
   background: var(--panel); transition: transform var(--dur-slide) var(--ease);
@@ -226,6 +257,14 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 /* ---- バッジ ------------------------------------------------------- */
 .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: var(--r-pill); margin-left: 8px; }
 .badge-est { color: var(--warn); border: 1px solid var(--warn); }
+/* 押せるバッジ（校正のしかたへ飛ぶ）。見た目は小さくても当たり判定は 44px 以上にする。
+   行高を膨らませないため、はみ出す分は負マージンで吸収する（.warn-help と同じ手当て）。 */
+.badge-link {
+  background: transparent; font: inherit; font-size: 11px; font-weight: 600;
+  min-height: var(--tap-min); margin-top: -10px; margin-bottom: -10px;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+.badge-link:active { background: var(--press); }
 
 /* ===== ストロボパネル ============================================= */
 .flash-panel {
@@ -240,8 +279,19 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .wheel {
   position: relative; height: 64px; overflow: hidden;
   border: 1px solid var(--rule); border-radius: var(--r-chip); background: var(--panel);
-  touch-action: pan-y; user-select: none; -webkit-user-select: none;
+  user-select: none; -webkit-user-select: none;
 }
+/* **操作するホイールだけに touch-action を宣言する。**
+   横のジェスチャはアプリが受け取り、縦はページのスクロールへ渡す、という宣言。
+   これが無いと、横スワイプ中に縦スクロールが始まった瞬間にブラウザがタッチを引き取り
+   pointercancel が飛ぶ。ジェスチャ境界が壊れると値が飛ぶ（js/wheel.js の pointercancel 参照）。
+
+   **none にしないこと。** 計算タブは画面の大半がホイールなので、ホイール上から始めた
+   縦スクロールができなくなり操作不能になる。
+
+   読み取り専用（結果パネルのトラック）には付けない。入力を受け付けないので競合しない。
+   付けても害はないが、「ここは操作する要素」という意図をこの1行で表すため分けている。 */
+.wheel:not(.is-readonly) { touch-action: pan-y; }
 .wheel.is-readonly { opacity: .95; }
 .wheel-track {
   position: absolute; top: 0; bottom: 0; left: 50%; display: flex; align-items: center;
@@ -262,7 +312,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .wheel-pointer {
   position: absolute; left: 50%; top: 4px; bottom: 4px; width: 2px; transform: translateX(-1px);
-  background: var(--flash); border-radius: 1px; pointer-events: none;
+  background: var(--accent); border-radius: 1px; pointer-events: none;
 }
 .wheel-edge { box-shadow: inset 0 0 0 2px var(--rule); }
 /* トラック（結果パネル内・ラベル付き） */
@@ -271,7 +321,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   display: flex; align-items: center; justify-content: center; width: var(--tap-min); height: var(--tap-min);
   color: var(--ink-2); border-radius: var(--r-chip);
 }
-.track-lock[aria-pressed="true"] { color: var(--flash); }
+.track-lock[aria-pressed="true"] { color: var(--accent); }
 .track-lock:active { background: var(--press); }
 .track-name { width: 34px; font-size: 12px; font-weight: 600; color: var(--ink-2); text-align: right; }
 .track-name.is-flash { color: var(--flash); }
@@ -324,7 +374,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   overflow-x: auto; scrollbar-width: none;
 }
 .result-summary .sum-values::-webkit-scrollbar { display: none; }
-.result-summary .icon { width: 18px; height: 18px; margin-left: auto; flex: none; }
+.result-summary .icon { width: var(--icon-xs); height: var(--icon-xs); margin-left: auto; flex: none; }
 .result-summary .icon.info  { color: var(--ink-2); }
 .result-summary .icon.warn  { color: var(--warn); }
 .result-summary .icon.alert { color: var(--alert); }
@@ -332,7 +382,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .wall-readout { display: flex; align-items: baseline; gap: 8px; color: var(--flash); }
 .wall-label { font-size: 12px; font-weight: 600; }
 .wall-num { font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 24px; font-weight: 700; }
-.result-badges { display: flex; gap: 6px; margin-left: auto; }
+/* バッジは押せる（.badge-link）ので、タップ対象の間隔として --gap-tap を使う */
+.result-badges { display: flex; gap: var(--gap-tap); margin-left: auto; }
 
 .ev-ruler { margin: 8px 0; }
 .ev-scale {
@@ -345,8 +396,8 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .ev-scale-tick::before { content: ""; position: absolute; top: 0; left: 0; width: 1px; height: 7px; background: var(--rule); }
 .ev-scale-tick.major::before { height: 13px; background: var(--ink-2); }
 .ev-scale-tick .ev-t-label { position: absolute; top: 13px; left: 2px; font-size: 10px; color: var(--ink-2); font-family: var(--font-num); }
-.ev-needle { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; transform: translateX(-1px); background: var(--flash); }
-.ev-needle-clip { position: absolute; top: 2px; font-size: 11px; font-weight: 700; color: var(--flash); font-family: var(--font-num); }
+.ev-needle { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; transform: translateX(-1px); background: var(--accent); }
+.ev-needle-clip { position: absolute; top: 2px; font-size: 11px; font-weight: 700; color: var(--accent); font-family: var(--font-num); }
 .ev-needle-clip.left { left: 2px; } .ev-needle-clip.right { right: 2px; }
 
 .result-systems { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 4px; }
@@ -371,7 +422,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .warnings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 /* flex-wrap は警告内の解決ボタン（.warn-action）を独立した行に落とすため */
 .warn-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.45; }
-.warn-item .icon { width: 18px; height: 18px; margin-top: 1px; flex: none; }
+.warn-item .icon { width: var(--icon-xs); height: var(--icon-xs); margin-top: 1px; flex: none; }
 .warn-item.info  { color: var(--ink-2); } .warn-item.info .icon  { color: var(--ink-2); }
 .warn-item.warn  { color: var(--warn); }  .warn-item.warn .icon  { color: var(--warn); }
 .warn-item.alert { color: var(--alert); } .warn-item.alert .icon { color: var(--alert); }
@@ -408,7 +459,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .calib-title { font-size: 13px; font-weight: 700; margin-bottom: 4px; }
 .calib-form .caption { display: block; color: var(--ink-2); font-size: 12px; margin-bottom: 8px; }
 .btn { min-height: var(--tap-min); padding: 0 16px; border-radius: var(--r-chip); font-weight: 600; font-size: 14px; }
-.btn-primary { background: var(--flash); color: #fff; }
+.btn-primary { background: var(--accent); color: var(--on-accent); }
 .btn-ghost { border: 1px solid var(--rule); color: var(--ink); }
 .btn-block { width: 100%; }
 .btn:active { opacity: .85; }
@@ -417,7 +468,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .toast {
   position: fixed; left: 50%; bottom: calc(56vh + 12px); bottom: calc(56dvh + 12px); transform: translateX(-50%);
   max-width: calc(100vw - 32px); z-index: 40;
-  background: var(--ink); color: var(--paper); font-size: 13px; padding: 10px 16px; border-radius: var(--r-pill);
+  background: var(--ink); color: var(--paper); font-size: 13px; padding: 12px 16px; border-radius: var(--r-pill);
   box-shadow: 0 4px 16px var(--overlay);
 }
 .toast[hidden] { display: none; }
@@ -434,7 +485,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .setup-nav { display: flex; gap: 8px; }
 .setup-dots { display: flex; gap: 6px; justify-content: center; margin-top: 16px; }
 .setup-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--rule); }
-.setup-dot.on { background: var(--flash); }
+.setup-dot.on { background: var(--accent); }
 
 /* ===== マニュアル（全画面シート。manual.md §0.3・§0.7）=========== */
 .sheet {
@@ -464,7 +515,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   border-radius: var(--r-chip); color: var(--ink-2);
 }
 .tray-toggle:active { background: var(--press); }
-.tray-toggle[aria-expanded="true"] { color: var(--flash); background: var(--sel); }
+.tray-toggle[aria-expanded="true"] { color: var(--accent); background: var(--sel); }
 .manual-index {
   position: absolute; top: calc(var(--header-h) + var(--sat)); bottom: 0; left: 0;
   z-index: 2; width: 50%; min-width: 200px;
@@ -516,7 +567,7 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   border-radius: var(--r-chip); color: var(--ink-2);
 }
 .warn-help:active { background: var(--press); }
-.warn-help .icon { width: 18px; height: 18px; }
+.warn-help .icon { width: var(--icon-xs); height: var(--icon-xs); }
 /* 警告内の解決ボタン。設定タブへ移動せずその場で直せるようにする（袋小路を作らないため） */
 /* 独立した行に落として全幅。指1本・片手で押せる高さを確保する */
 .warn-action {

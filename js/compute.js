@@ -13,7 +13,7 @@ import {
   shakeWarning, overBrightWarning, freezeWarning, ndAdvice,
   daylightSync, slowSyncAmbient, formatStops, formatOffset, THIRD_STOP,
 } from './advisor.js';
-import { SUBJECTS, MODIFIERS, POWER_STEPS, HELP } from './scenes.js';
+import { SUBJECTS, MODIFIERS, POWER_STEPS, HELP, HELP_LINKS } from './scenes.js';
 
 const SLOWEST = 2 ** (-SS.minIndex / 3); // 系列最遅（= 30″ の実体 32 秒）
 const F8 = 8; // 風景の固定F値
@@ -604,7 +604,9 @@ export function compute(st) {
     uncalibrated: flashOn && isUncalibrated(prof, st.flash.modifier),
     filters: filterInfo(st),
   };
-  if (d.uncalibrated) d.badges.push({ kind: 'est', text: '推定値（未校正）' });
+  // バッジにも helpId を持たせる。警告には ? が付くのにバッジからは校正手順へ行けない、
+  // という非対称を作らないため（report-a2 §6 で未実装として記録されていた導線）。
+  if (d.uncalibrated) d.badges.push({ kind: 'est', text: '推定値（未校正）', helpId: HELP_LINKS.calibration });
   attachedFilterWarnings(st, d);
 
   // 入口で「何が F/SS/ISO を決めるか」を一度だけ解決する。

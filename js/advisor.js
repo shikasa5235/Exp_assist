@@ -226,6 +226,9 @@ export function daylightSync(p) {
   const evAmbient = evT - ambientOffset;
   const fAtSyncReal = Math.sqrt(syncSpeedReal * 2 ** evAmbient);
 
+  // fAtSync（丸めたラベル）は js/ からは読まれない。**テスト #19 が読むので残す**
+  // ——「同調速度で適正になるF値」は日中シンクロの理解の中心で、壁の段数が正しいことを
+  // 表示ラベルの水準で確かめられる唯一の出口。消すと #19 が検証対象を失う。
   const out = { evAmbient, fAtSyncReal, fAtSync: snap(F, fAtSyncReal), warnings: [] };
   if (desiredN == null) return out;
 

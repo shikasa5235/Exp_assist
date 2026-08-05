@@ -68,17 +68,7 @@ export function setFlag(name, value) {
   }
 }
 
-/**
- * localStorage が使えるか（書込テスト）。
- * @returns {boolean}
- */
-export function available() {
-  try {
-    const k = '__expo_probe__';
-    localStorage.setItem(k, '1');
-    localStorage.removeItem(k);
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
+// available()（書込テストで可否を先に調べる関数）は削除した。
+// save() が成否を返すので、本番の書き込みそのものが最も正確な判定になる。
+// 探りの書き込みを1回増やすだけで、判定が二重になり食い違う余地を作っていた。
+// 保存できないことの通知は ui.setState → warnStorageOnce が担う（UI仕様 §12）。

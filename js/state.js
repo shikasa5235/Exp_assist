@@ -5,7 +5,10 @@
 // 既定値は実機確定の上書きを含む（メモリ confirmed-default-overrides）：
 //   ベースISO 200 ／ 拡張ISO下限 50 ／ SS上限 1/8000
 
-import { MODIFIERS } from './scenes.js';
+import {
+  MODIFIERS, BASE_ISO_DEFAULT, EXPANDED_ISO_MIN_DEFAULT,
+  BLACK_MIST_STOPS, K_DEFAULT, HSS_BASE_LOSS_DEFAULT,
+} from './scenes.js';
 
 /** @typedef {Object} AppState アプリの単一状態（UI仕様 §9 の形） */
 
@@ -29,8 +32,8 @@ export const defaultState = {
   // allowExpandedIso: false なら ISO の下限は isoMin(200)、true なら expandedISOMin(50)。
   // 撮影ごとの判断（画質を取るか ND 枚数を減らすか）なので機材設定ではなく撮影タブに置く。
   camera: {
-    syncSpeed: 1 / 250, maxSS: 1 / 8000, isoMin: 200, isoMax: 6400, isStops: 0,
-    expandedISOMin: 50, allowExpandedIso: false,
+    syncSpeed: 1 / 250, maxSS: 1 / 8000, isoMin: BASE_ISO_DEFAULT, isoMax: 6400, isStops: 0,
+    expandedISOMin: EXPANDED_ISO_MIN_DEFAULT, allowExpandedIso: false,
   },
   lens: { fMin: 2.8, fMax: 22 },
   // powerMode: 'auto' = 発光量を計算で決める（従属変数）／'fixed' = ユーザーが選び「距離」を解く。
@@ -48,10 +51,13 @@ export const defaultState = {
   // 段数は 1/1=0 … 1/128=7 なので、上限（強い側）のほうが数値は小さい。取り違えないこと。
   // cal = モディファイアごとの実測 k（{ reflector: 2.33, … }）。無い組み合わせは未校正で k を推定に使う。
   profiles: [
-    { id: 'p1', name: '100Ws', ws: 100, k: 4.0, hss: true, minPowerStops: 7, powerCeilingStops: 2, modifier: 'reflector', cal: {} },
-    { id: 'p2', name: '200Ws', ws: 200, k: 4.0, hss: true, minPowerStops: 7, powerCeilingStops: 2, modifier: 'reflector', cal: {} },
+    { id: 'p1', name: '100Ws', ws: 100, k: K_DEFAULT, hss: true, minPowerStops: 7, powerCeilingStops: 2, modifier: 'reflector', cal: {} },
+    { id: 'p2', name: '200Ws', ws: 200, k: K_DEFAULT, hss: true, minPowerStops: 7, powerCeilingStops: 2, modifier: 'reflector', cal: {} },
   ],
-  settings: { hssBaseLoss: 2.0, ambientOffsetDefault: -1, ownedND: [1, 2, 3, 4], comp: 0, blackMistStops: 0 },
+  settings: {
+    hssBaseLoss: HSS_BASE_LOSS_DEFAULT, ambientOffsetDefault: -1,
+    ownedND: [1, 2, 3, 4], comp: 0, blackMistStops: BLACK_MIST_STOPS,
+  },
   // manual: null なら閉。'help-xxxx' ならそのセクションを開く（再描画経路を増やさないため state に置く）
   // panelSize: 結果パネルの高さ。屋外・片手で入力と結果のどちらに画面を配分するかをユーザーが決める。
   // 'expanded'(画面高の約60%) | 'normal'(現状) | 'minimal'(約56px・数値1行)。storage に永続化する。
