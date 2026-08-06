@@ -13,10 +13,12 @@ import { formatStops } from './advisor.js';
 import {
   SCENES, SUBJECTS, MODIFIERS, POWER_STEPS, AMBIENT_OFFSETS,
   K_MIN, K_MAX, HSS_BASE_LOSS_MIN, HSS_BASE_LOSS_MAX, BLACK_MIST_STOPS_MAX,
-  HIGHLIGHT_HEADROOM_MIN, HIGHLIGHT_HEADROOM_MAX,
+  HIGHLIGHT_HEADROOM_MIN, HIGHLIGHT_HEADROOM_MAX, MEASURED_SCENE_KEY,
 } from './scenes.js';
 import { F, SS, ISO } from './stops.js';
 import { calibrate } from './flash.js';
+import { parseExif } from './exif.js';
+import { evFromExposure, solveAeOffset, measurementNotes } from './lightmeter.js';
 import { makeWheel } from './wheel.js';
 import { defaultState, clone, mergeDeep, migrate, clampPanelSize, PANEL_SIZES } from './state.js';
 import * as storage from './storage.js';
@@ -80,6 +82,7 @@ function cacheElements() {
     'curtain-field', 'curtain-toggle', 'result-panel', 'wall-readout', 'wall-num',
     'result-badges', 'ev-ruler', 'result-systems', 'path-compare', 'warnings', 'toast',
     'result-announce',
+    'meter-field', 'meter-badge', 'meter-file', 'meter-result', 'meter-use', 'meter-notes',
     'calc-ev', 'calc-ev-err', 'calc-nd-chips', 'calc-tracks', 'equiv-list', 'settings-root',
     'power-chips', 'power-hint', 'panel-handle', 'result-summary',
     'manual', 'manual-open', 'manual-close', 'manual-index', 'manual-body', 'manual-tray-toggle',
@@ -368,6 +371,8 @@ function wireManual() {
   // 結果パネルのバッジは再描画で作り直されるので委譲、ストロボパネルのバッジは静的だが同じ経路に乗せる。
   el.resultBadges.addEventListener('click', openHelpFrom);
   el.uncalibratedBadge.addEventListener('click', openHelpFrom);
+  el.meterBadge.addEventListener('click', openHelpFrom);
+  wireLightMeter();
   // 目次はページ内リンク。履歴を汚さずスクロールだけする。ジャンプ後もトレイは開いたまま（§0.4）
   el.manualIndex.addEventListener('click', (e) => {
     const a = e.target.closest('a[href^="#"]');
@@ -572,6 +577,8 @@ function renderTab1() {
   rebuildPowerChipsIfNeeded();
   setChecked(el.powerChips, state.flash.powerMode === 'auto' ? 'auto' : String(state.flash.powerStops));
   renderPowerHint();
+
+  renderMeter();
 
   // 微調整スライダー（state[段] → DOM[1/3段単位] の逆変換。Math.round で旧データの端数もグリッドへ戻す）
   el.sceneAdjust.value = String(Math.round(state.scene.adjust * 3));
@@ -871,6 +878,100 @@ function equivHtml(rows) {
 }
 
 /* ====================================================================== */
+/*  スマホ露出計（写真から測る。photocal-spec §3）                          */
+/* ====================================================================== */
+
+/**
+ * 直近の測定結果。**state に入れない。**
+ * 「使う」を押すまでは候補にすぎず、保存すると次回起動で古い EV が生き返る。
+ * 適用したものは `state.scene`（key = MEASURED_SCENE_KEY）に入り、そちらは永続化される。
+ * @type {{ev:number|null, text:string, notes:string[]}|null}
+ */
+let measurement = null;
+
+/**
+ * File → ArrayBuffer。`File.arrayBuffer()` は Safari 14 以降なので古い iOS では
+ * FileReader に落ちる（tools/exif-probe.html と同じ手当て）。
+ * @param {File} file @returns {Promise<ArrayBuffer>}
+ */
+function readImageBuffer(file) {
+  if (typeof file.arrayBuffer === 'function') return file.arrayBuffer();
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(fr.error || new Error('読み込みに失敗しました'));
+    fr.readAsArrayBuffer(file);
+  });
+}
+
+function wireLightMeter() {
+  el.meterFile.addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    e.target.value = ''; // 同じ写真を選び直しても change が出るようにする
+    measurement = { ev: null, text: '読み込み中…', notes: [] };
+    renderMeter();
+    measure(f).catch((err) => {
+      // **黙って失敗しない。** 例外の内容まで出す（原因が追えないと現場で詰む）
+      measurement = { ev: null, text: `写真を読み取れませんでした（${err && err.message ? err.message : err}）`, notes: [] };
+      renderMeter();
+    });
+  });
+  el.meterUse.addEventListener('click', () => {
+    if (!measurement || measurement.ev === null) return;
+    // シーンチップの選択が外れる（MEASURED_SCENE_KEY は SCENES に無い）。
+    // 微調整はここからの補正として使えるよう 0 に戻す
+    setState({ scene: { key: MEASURED_SCENE_KEY, evBase: measurement.ev, adjust: 0 } });
+    toast(`実測 EV ${measurement.ev.toFixed(1)} を使います`);
+  });
+}
+
+/** 写真1枚を測る。DOM への反映は renderMeter に任せる。 */
+async function measure(file) {
+  const exif = parseExif(await readImageBuffer(file));
+  if (!exif) {
+    measurement = { ev: null, text: 'この写真を読み取れませんでした', notes: [] };
+  } else if (exif.format === 'heic') {
+    // 実機では iOS が JPEG に変換して渡すのでここには来ないはず。経路が変わったときの退避
+    measurement = { ev: null, text: '設定 → カメラ → フォーマット → 互換性優先 に変更すると読み取れます', notes: [] };
+  } else if (exif.format !== 'jpeg') {
+    measurement = { ev: null, text: 'この写真には撮影情報がありません。カメラアプリで撮った写真を選んでください', notes: [] };
+  } else {
+    // 校正済みなら AE オフセットを足す。未校正なら 0（バッジで「推定値」と示す）
+    const offset = state.phone.aeCalibrated ? state.phone.aeOffsetStops : 0;
+    const m = evFromExposure(exif, offset);
+    measurement = m.ev === null
+      // F/SS/ISO のどれも無い＝そもそも EXIF が無い写真（スクショ・加工後の保存など）
+      ? { ev: null, text: exif.fNumber === null && exif.exposureTime === null && exif.iso === null
+        ? 'この写真には撮影情報がありません。カメラアプリで撮った写真を選んでください'
+        : m.reason, notes: [] }
+      : { ev: m.ev, text: `EV ${m.ev.toFixed(1)} を測定しました`, notes: measurementNotes(m, exif.focalLength35, state.phone) };
+  }
+  renderMeter();
+}
+
+/**
+ * 測定 UI の描画。`renderTab1` からも、測定の直後からも呼ぶ。
+ * **measurement は state の外にあるので、ここだけは setState を経由せず描く。**
+ * 触るのは自分の DOM だけで、他の描画に影響しない。
+ */
+function renderMeter() {
+  const applied = state.scene.key === MEASURED_SCENE_KEY;
+  const ok = measurement && measurement.ev !== null;
+  // 適用済みの値と測定値が一致していれば「使用中」（押した直後に「使う」が残らない）
+  const same = ok && applied && Math.abs(state.scene.evBase - measurement.ev) < 1e-9;
+  el.meterResult.textContent = same || (applied && !measurement)
+    ? `実測 EV ${state.scene.evBase.toFixed(1)} を使用中`
+    : (measurement ? measurement.text : '');
+  el.meterResult.classList.toggle('is-error', !!measurement && measurement.ev === null);
+  el.meterUse.hidden = !ok || same;
+  el.meterNotes.textContent = measurement ? measurement.notes.join('／') : '';
+  el.meterNotes.hidden = !el.meterNotes.textContent;
+  // 未校正バッジは「値が出ているとき」だけ意味を持つ（エラー文の横に出しても仕方がない）
+  el.meterBadge.hidden = !derived.phoneUncalibrated || !(ok || applied);
+}
+
+/* ====================================================================== */
 /*  設定タブ（タブ3）＋ 校正                                               */
 /* ====================================================================== */
 
@@ -908,6 +1009,8 @@ function buildSettings() {
   FLAT_SETTINGS.filter((f) => f.group === 0).forEach((f) => g0.appendChild(settingRow(f)));
   const g1 = settingsGroup('ストロボプロファイル');
   state.profiles.forEach((p, i) => g1.appendChild(profileCard(p, i)));
+  const gPhone = settingsGroup('スマホ露出計');
+  gPhone.appendChild(phoneCalibrationForm());
   const g2 = settingsGroup('その他');
   FLAT_SETTINGS.filter((f) => f.group === 2).forEach((f) => g2.appendChild(settingRow(f)));
   g2.appendChild(ownedNdRow());
@@ -917,7 +1020,7 @@ function buildSettings() {
   reset.style.marginTop = '8px';
   reset.addEventListener('click', () => { if (confirm('すべての設定を初期値に戻しますか？')) setState(clone(defaultState)); });
   g2.appendChild(reset);
-  root.append(g0, g1, g2);
+  root.append(g0, g1, gPhone, g2);
 
   // 数値項目の確定（change/blur）：捕捉→検証・クランプ→setState（§10）
   root.addEventListener('change', onSettingChange);
@@ -1097,6 +1200,116 @@ function runCalibration(form, i) {
   } catch (e) {
     // 黙って何もしない状態を作らない。バッジの消失だけが手がかりだと原因を追えない
     toast(`校正できませんでした。入力を確認してください（${e.message}）`);
+  }
+}
+
+/* ---- スマホ露出計の校正（設定タブ。photocal-spec §3.2）------------------ */
+
+/** 校正の①で選ばれた写真の EXIF。**state に入れない**（測定と同じ理由：適用前の候補）。 */
+let calPhoneExif = null;
+
+/**
+ * シャッター速度の入力を秒へ。`1/250` も `250` も `2s` も受ける。
+ * 数字だけに削ると `1/250` が 1250 になるため専用に解析する（`parsePowerStops` と同じ考え方）。
+ * @param {string} text @returns {number} 秒（読めなければ NaN）
+ */
+function parseShutter(text) {
+  const s = String(text).trim();
+  const frac = s.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/);
+  if (frac) { const d = Number(frac[2]); return d > 0 ? Number(frac[1]) / d : NaN; }
+  const n = parseFloat(s.replace(/[^\d.]/g, ''));
+  if (!Number.isFinite(n) || n <= 0) return NaN;
+  if (/[s"”″秒]/.test(s)) return n;          // 「2s」「2″」は秒そのもの
+  return n >= 1 ? 1 / n : n;                 // 「250」→1/250、「0.5」→0.5秒
+}
+
+/**
+ * スマホ露出計の校正フォーム。ストロボ校正と同じ表示規則（常時展開・成功も失敗もトースト）。
+ *
+ * **カメラ側だけ公称ラベル→厳密値に変換する**（`lightmeter.solveAeOffset` が行う）。
+ * スマホ側は EXIF の実測値（1/4405 など）なので変換しない。この非対称が精度の要。
+ * @returns {HTMLElement}
+ */
+function phoneCalibrationForm() {
+  const form = document.createElement('div');
+  form.className = 'calib-form';
+  form.innerHTML = `
+    <div class="calib-title">スマホを露出計として校正する</div>
+    <p class="caption">スマホの自動露出は 18%グレーに合わせるとは限らず、機種ごとに一定のずれがあります。
+    <strong>一度測れば以後ずっと使えます。</strong>基準はカメラです。</p>
+    <p class="caption">① 同じシーンをスマホで撮り、その写真を選ぶ　② 同じシーンをカメラで測光した値を入れる</p>
+    <div class="set-row"><label for="cal-phone-file">① スマホの写真</label>
+      <span class="meter-row">
+        <label class="btn btn-ghost meter-pick" for="cal-phone-file">写真を選ぶ</label>
+        <input type="file" id="cal-phone-file" class="sr-only">
+        <span class="meter-result" id="cal-phone-result"></span>
+      </span></div>
+    <div class="set-row"><label>② カメラの適正F値</label><input class="input" data-p="f" type="text" inputmode="decimal" value="8"></div>
+    <div class="set-row"><label>そのときのSS<br><span class="caption">1/250 でも 250 でも可。2秒なら 2s</span></label><input class="input" data-p="ss" type="text" inputmode="decimal" value="250"></div>
+    <div class="set-row"><label>そのときのISO</label><input class="input" data-p="iso" type="text" inputmode="decimal" value="100"></div>
+    <p class="caption meter-privacy">写真は端末内で読み取るだけで、どこにも送信されません。位置情報は読み取りません。</p>`;
+  const run = document.createElement('button');
+  run.type = 'button'; run.className = 'btn btn-primary btn-block'; run.textContent = 'この結果で校正する';
+  run.addEventListener('click', () => runPhoneCalibration(form));
+  form.appendChild(run);
+  const clear = document.createElement('button');
+  clear.type = 'button'; clear.className = 'btn btn-ghost btn-block'; clear.textContent = '校正を取り消す';
+  clear.style.marginTop = '8px';
+  clear.addEventListener('click', () => {
+    setState({ phone: { aeOffsetStops: 0, aeCalibrated: false, aeCalFocal35: null } });
+    toast('スマホ露出計の校正を取り消しました');
+  });
+  form.appendChild(clear);
+
+  const out = form.querySelector('#cal-phone-result');
+  form.querySelector('#cal-phone-file').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    e.target.value = '';
+    out.textContent = '読み込み中…';
+    readImageBuffer(f)
+      .then((buf) => {
+        calPhoneExif = parseExif(buf);
+        const m = calPhoneExif ? evFromExposure(calPhoneExif, 0) : { ev: null, reason: '読み取れません' };
+        // 校正の材料が揃ったかをその場で見せる。押してから失敗するより早い
+        out.textContent = m.ev === null
+          ? (calPhoneExif && calPhoneExif.format === 'heic'
+            ? '設定 → カメラ → フォーマット → 互換性優先 に変更すると読み取れます'
+            : (m.reason || 'この写真には撮影情報がありません'))
+          : `スマホ EV ${m.ev.toFixed(2)}`;
+        out.classList.toggle('is-error', m.ev === null);
+      })
+      .catch((err) => { out.textContent = `読み取れませんでした（${err && err.message ? err.message : err}）`; out.classList.add('is-error'); });
+  });
+  return form;
+}
+
+/** 校正の実行：offset = EV_camera − EV_phone を求めて保存する。 */
+function runPhoneCalibration(form) {
+  try {
+    if (!calPhoneExif) throw new Error('① のスマホの写真を選んでください');
+    const val = (p) => String(form.querySelector(`[data-p="${p}"]`).value).trim();
+    const camera = {
+      fNumber: parseFloat(val('f').replace(/[^\d.]/g, '')),
+      exposureTime: parseShutter(val('ss')),
+      iso: parseFloat(val('iso').replace(/[^\d.]/g, '')),
+    };
+    const r = solveAeOffset(calPhoneExif, camera);
+    if (r.offsetStops === null) throw new Error(r.reason);
+    // 経験的には −0.5〜−2段。桁違いの値は入力の取り違えなので受け付けない
+    if (Math.abs(r.offsetStops) > 5) {
+      throw new Error(`ずれが ${r.offsetStops.toFixed(1)}段 と大きすぎます。カメラ側の入力を確認してください`);
+    }
+    setState({ phone: {
+      aeOffsetStops: r.offsetStops, aeCalibrated: true,
+      aeCalFocal35: Number.isFinite(calPhoneExif.focalLength35) ? calPhoneExif.focalLength35 : null,
+    } });
+    // 書けたことを state から読み返して確認する（ストロボ校正と同じ規則）
+    if (!state.phone.aeCalibrated) throw new Error('保存できませんでした');
+    const sign = r.offsetStops >= 0 ? '+' : '−';
+    toast(`スマホ露出計を校正しました（ずれ ${sign}${Math.abs(r.offsetStops).toFixed(2)}段 / スマホ EV ${r.evPhone.toFixed(2)} → カメラ EV ${r.evCamera.toFixed(2)}）`);
+  } catch (e) {
+    toast(`校正できませんでした（${e.message}）`);
   }
 }
 

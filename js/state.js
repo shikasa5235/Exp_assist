@@ -63,6 +63,12 @@ export const defaultState = {
     hssBaseLoss: HSS_BASE_LOSS_DEFAULT, ambientOffsetDefault: -1,
     ownedND: [1, 2, 3, 4], comp: 0, blackMistStops: BLACK_MIST_STOPS,
   },
+  // スマホ露出計（photocal-spec §3.2）。**項目の追加なので schemaVersion は上げない**（§9）。
+  // aeOffsetStops: カメラを基準にした AE のずれ（段）。ストロボの k と同じ「実測でしか
+  //   得られない資産」なので、初期値へ戻す以外で消さないこと。
+  // aeCalFocal35: 校正したときの35mm換算焦点距離。測定時に大きく違えば注記を出す
+  //   （レンズごとにオフセットを持つのは過剰。注記だけ）。
+  phone: { aeOffsetStops: 0, aeCalibrated: false, aeCalFocal35: null },
   // manual: null なら閉。'help-xxxx' ならそのセクションを開く（再描画経路を増やさないため state に置く）
   // panelSize: 結果パネルの高さ。屋外・片手で入力と結果のどちらに画面を配分するかをユーザーが決める。
   // 'expanded'(画面高の約60%) | 'normal'(現状) | 'minimal'(約56px・数値1行)。storage に永続化する。

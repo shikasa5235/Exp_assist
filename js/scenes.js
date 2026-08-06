@@ -17,6 +17,13 @@
  * 逆光は EV では区別できないので、`flash.backlit` トグルで `BACKLIT_EXTRA_STOPS` を足す。
  * 快晴 2.5 + 2.0 = 4.5（＝仕様の「快晴・逆光」）、薄曇り 2.0 + 2.0 = 4.0（＝同「晴れ・日陰の被写体」）。
  */
+/**
+ * 写真からの実測 EV を使っているときの `scene.key`。**`SCENES` にわざと入れていない。**
+ * 表引きが外れることで白飛び判定（`contrast`）が自動的に黙る — 測定値からは空と被写体の
+ * コントラストが分からないので、当てずっぽうの警告を出さないほうがよい。
+ */
+export const MEASURED_SCENE_KEY = 'measured';
+
 export const SCENES = Object.freeze([
   // 屋外
   { key: 'snow',       label: '雪山・砂浜の直射', ev: 16, group: '屋外', contrast: 2.5 },
@@ -150,6 +157,9 @@ export const HELP = Object.freeze({
  */
 export const HELP_LINKS = Object.freeze({
   calibration: 'help-calibration',
+  // 「写真から測る」の注記（EXIF なし・ナイトモード・露出補正・別レンズ・HEIC）の行き先。
+  // これらは compute の警告ではなく測定 UI 側の注記なので `HELP` には置かない
+  lightmeter: 'help-lightmeter',
 });
 
 /** APEX の基準 ISO。EV 換算の分母。 */

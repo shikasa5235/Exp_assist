@@ -124,6 +124,24 @@
         <div class="field-label" id="lbl-scene">シーン</div>
         <div class="tile-row" id="scene-tiles" role="radiogroup" aria-labelledby="lbl-scene"></div>
       </div>
+      <!-- スマホ露出計（photocal-spec §3.4）。**シーンチップを置き換えず併存させる。**
+           EXIF から F/SS/ISO を読んで EV を逆算する。写真は端末内で読むだけ -->
+      <div class="field" id="meter-field">
+        <div class="label-row">
+          <div class="field-label" id="lbl-meter">写真から測る</div>
+          <button type="button" class="badge badge-est badge-link" id="meter-badge"
+                  data-help="help-lightmeter" aria-label="推定値（未校正）。写真から測るの説明を開く" hidden>推定値（未校正）</button>
+        </div>
+        <div class="meter-row">
+          <!-- accept は指定しない。HEIC を選ばれても検出して案内できるようにする -->
+          <label class="btn btn-ghost meter-pick" for="meter-file">写真を選ぶ</label>
+          <input type="file" id="meter-file" class="sr-only" aria-labelledby="lbl-meter">
+          <span class="meter-result" id="meter-result" role="status" aria-live="polite"></span>
+          <button type="button" class="btn btn-primary meter-use" id="meter-use" hidden>使う</button>
+        </div>
+        <p class="meter-notes caption" id="meter-notes"></p>
+        <p class="caption meter-privacy">写真は端末内で読み取るだけで、どこにも送信されません。位置情報は読み取りません。</p>
+      </div>
       <div class="field">
         <label class="field-label" for="scene-adjust">微調整<span class="field-value" id="scene-adjust-val">0.0段</span></label>
         <!-- 値の単位は「1/3段」。-6〜+6 が ±2段。step=1 で 1/3段スナップを構造的に担保 -->
@@ -382,6 +400,52 @@
         <p>撮った結果が明るすぎた／暗すぎたときは、その差ぶんだけスライダーを動かします。
         1段暗かったなら <span class="num">+1.0</span>、1/3段だけ明るかったなら <span class="num">−0.3</span> です。</p>
         <p>同じ場所で撮り続けるなら、最初の1枚で微調整を決めてしまえば以降は合います。</p>
+        <h4><a id="help-lightmeter"></a>写真から測る（スマホを露出計にする）</h4>
+        <p>シーンのタイルは±1段の目安ですが、<strong>スマホで1枚撮ればその場の明るさを実測できます。</strong>
+        スマホのカメラは自動露出でF値・SS・ISOを決め、それを写真に記録しています。
+        その3つから逆算すると、シーンのEVが求まります。<strong>これは露出計そのものの原理です。</strong></p>
+        <ol>
+          <li>測りたい方向にスマホのカメラを向けて1枚撮る</li>
+          <li>「写真を選ぶ」でその写真を選ぶ</li>
+          <li>「EV 14.1 を測定しました」と出たら「使う」を押す</li>
+        </ol>
+        <p>使うとシーンのタイルの選択が外れ、「実測 EV 14.1 を使用中」になります。
+        <strong>微調整スライダーはそのまま使えます。</strong> 実測値からの補正として働きます。</p>
+        <p><strong>日中シンクロではシーンEVが背景の明るさを直接決めます。</strong> ここが実測になると、
+        狙った背景の明るさになる確率が上がります。</p>
+        <h4>写真は端末から出ません</h4>
+        <p><strong>写真は端末内で読み取るだけで、どこにも送信されません。位置情報は読み取りません。</strong>
+        このアプリは通信をしない作りなので、これは事実としてそう書けます。
+        写真そのものも保存しません。取り出すのは明るさの数値だけです。</p>
+        <h4>露出補正をかけないでください</h4>
+        <p>スマホで露出補正をかけて撮ると、その分ずれます。アプリは補正の値を読んで計算に入れますが、
+        <strong>補正がかかっていると自動露出の狙いから外れているので、精度は落ちます。</strong>
+        補正がかかった写真を選ぶと注記が出ます。<strong>補正を 0 に戻してから撮り直すのが確実です。</strong></p>
+        <p>ナイトモードは切ってください。多重露光なので記録された値の意味が変わります。
+        HDR は切ってもよいですが、<strong>切るより「いつも同じ設定で使う」ほうが実用的です。</strong>
+        ずれが一定なら、下の校正で丸ごと吸収されます。</p>
+        <h4>「推定値（未校正）」と出たら</h4>
+        <p>スマホの自動露出は 18%グレーに合わせるとは限りません。明るい場面ではハイライトを守って
+        暗めに、暗い場面では持ち上げ気味に決めます。<strong>このずれは機種ごとにほぼ一定です。</strong></p>
+        <p>未校正のままでも使えますが、精度は±2段程度です。<strong>設定タブの「スマホ露出計」で
+        一度校正すると±1/3段まで上がります。</strong> 一度測れば以後ずっと使えます。</p>
+        <table><tbody>
+          <tr><th>未校正</th><td>±2段</td></tr>
+          <tr><th>校正済み・同じレンズ・似たシーン</th><td>±1/3段</td></tr>
+          <tr><th>校正済み・レンズ切替（0.5x / 2x）</th><td>±2/3段</td></tr>
+          <tr><th>校正済み・逆光や夜景</th><td>±1段</td></tr>
+        </tbody></table>
+        <p>校正のしかたは、同じシーンをスマホとカメラの両方で測って差を保存するだけです。
+        <strong>基準はカメラです。</strong> このアプリの目的は「カメラがどう写るか」を当てることなので、
+        合わせる先はカメラでなければ意味がありません。</p>
+        <p>iPhone はレンズが複数あります（超広角・主・望遠）。校正したときと大きく違うレンズで
+        撮った写真を選ぶと注記が出ます。値は出ますが、精度は落ちます。</p>
+        <h4>読み取れないとき</h4>
+        <table><tbody>
+          <tr><th>この写真には撮影情報がありません</th><td>スクリーンショットや加工後に保存し直した写真です。カメラアプリで撮った写真を選んでください</td></tr>
+          <tr><th>撮影情報が不足しています</th><td>F値・SS・ISO のどれかが記録されていません</td></tr>
+          <tr><th>設定 → カメラ → フォーマット → 互換性優先 に変更すると読み取れます</th><td>写真が HEIC のまま渡されました。通常は iOS が JPEG に変換するので、ここは出ないはずです</td></tr>
+        </tbody></table>
       </section>
 
       <section id="help-intent">

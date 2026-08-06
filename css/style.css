@@ -283,6 +283,17 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .label-row .field-label { margin-bottom: 0; min-width: 0; }
 .label-row > .badge { flex: none; margin-left: 0; }
 
+/* ---- スマホ露出計（写真から測る）----------------------------------- */
+.meter-row { display: flex; align-items: center; flex-wrap: wrap; gap: var(--gap-tap); }
+/* label を button 風に見せる（file input 本体は .sr-only）。高さはタップ最小に揃える */
+.meter-pick { flex: none; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.meter-result { flex: 1 1 8em; min-width: 0; font-size: 13px; color: var(--ink); }
+.meter-result.is-error { color: var(--alert); }
+.meter-use { flex: none; }
+.meter-notes { color: var(--warn); margin-top: 8px; }
+.meter-notes:empty { display: none; }
+.meter-privacy { margin-top: 8px; }
+
 /* ===== ストロボパネル ============================================= */
 .flash-panel {
   border: 1px solid var(--flash); border-radius: var(--r-panel);

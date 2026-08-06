@@ -15,7 +15,7 @@ import {
 } from './advisor.js';
 import {
   SCENES, SUBJECTS, MODIFIERS, POWER_STEPS, HELP, HELP_LINKS,
-  HIGHLIGHT_HEADROOM_DEFAULT,
+  HIGHLIGHT_HEADROOM_DEFAULT, MEASURED_SCENE_KEY,
 } from './scenes.js';
 
 const SLOWEST = 2 ** (-SS.minIndex / 3); // 系列最遅（= 30″ の実体 32 秒）
@@ -763,6 +763,12 @@ export function compute(input) {
     // 未校正バッジはストロボを使うときだけ意味を持つ（GN 推定に関わるため）。
     // 校正はプロファイル×モディファイアごとなので、モディファイアを切り替えると追従する。
     uncalibrated: flashOn && isUncalibrated(prof, st.flash.modifier),
+    // スマホ露出計の未校正。**ストロボの未校正とは別物**（片方だけ校正済みがありうる）。
+    // 測定 UI の近くにだけ出すので `badges` には積まない（結果パネルの意味が変わってしまう）。
+    phoneUncalibrated: !(st.phone && st.phone.aeCalibrated),
+    // シーンEV が写真の実測か。`SCENES` に無いキーなので白飛び判定は自動的に黙る
+    // （測定値からは空と被写体のコントラストが分からない。当てずっぽうを出さない）
+    measuredScene: st.scene.key === MEASURED_SCENE_KEY,
     filters: filterInfo(st),
   };
   // バッジにも helpId を持たせる。警告には ? が付くのにバッジからは校正手順へ行けない、

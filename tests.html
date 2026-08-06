@@ -65,7 +65,9 @@
       shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning, blowoutWarning,
       daylightSync, slowSyncAmbient, ndCountWarnings, formatStops, ndAdvice,
     } from './js/advisor.js';
-    import { SUBJECTS, POWER_STEPS, HELP } from './js/scenes.js';
+    import { SUBJECTS, POWER_STEPS, HELP, MEASURED_SCENE_KEY } from './js/scenes.js';
+    import { parseExif } from './js/exif.js';
+    import { evFromExposure, solveAeOffset, lensChangeNote, measurementNotes } from './js/lightmeter.js';
     import { compute, clampManual } from './js/compute.js';
     import { makeState, migrate, mergeDeep, clampPanelSize } from './js/state.js';
     // wheel.js から純粋関数だけを取る（makeWheel は DOM を作るのでここでは使わない）
@@ -1056,6 +1058,275 @@
         actual: `上限 ${lim.max}（ISO${ISO.label(lim.max)}）／ISO12800 の index ${above}`,
         pass: ok,
       };
+    });
+
+    // ===== EXIF パーサ（photocal-spec §8.1）====================================
+    // **画像ファイルをリポジトリに置かない。** ここで Uint8Array を組み立てる。
+    // tools/exif-probe.html の検証で使った構成をそのまま持ってきている。
+
+    /**
+     * 合成 TIFF（208バイト）。IFD0 に Make/Model/ExifIFD ptr/GPS ptr、
+     * ExifIFD に SS/F/ISO/露出補正/Flash/35mm換算/撮影日時。
+     * @param {boolean} little II なら true
+     * @param {object} v 値の上書き
+     */
+    const buildTiff = (little, v = {}) => {
+      const {
+        fNum = 1244236, fDen = 699009,       // 実機の F1.7799999713880652
+        expNum = 1, expDen = 4405,           // 実機の 1/4405
+        iso = 80, biasNum = 0, biasDen = 1, focal35 = 24, flash = 0,
+      } = v;
+      const T = 208;
+      const t = new Uint8Array(T);
+      const dv = new DataView(t.buffer);
+      const w16 = (o, x) => dv.setUint16(o, x, little);
+      const w32 = (o, x) => dv.setUint32(o, x, little);
+      const i32 = (o, x) => dv.setInt32(o, x, little);
+      const ws = (o, s) => { for (let i = 0; i < s.length; i++) t[o + i] = s.charCodeAt(i); };
+      const ent = (o, tag, type, count, off, inline) => {
+        w16(o, tag); w16(o + 2, type); w32(o + 4, count);
+        if (inline) inline(o + 8); else w32(o + 8, off);
+      };
+      ws(0, little ? 'II' : 'MM'); w16(2, 42); w32(4, 8);
+      w16(8, 4);                                            // ---- IFD0（4件）
+      ent(10, 0x010F, 2, 6, 152);                           // Make "Nikon\0"
+      ent(22, 0x0110, 2, 3, 0, (o) => { ws(o, 'Z6'); });    // Model（3バイト = inline）
+      ent(34, 0x8769, 4, 1, 62);                            // ExifIFD ポインタ
+      ent(46, 0x8825, 4, 1, 202);                           // GPS ポインタ（**追わないことの確認用**）
+      w32(58, 0);
+      w16(62, 7);                                           // ---- ExifIFD（7件）
+      ent(64, 0x829A, 5, 1, 178);                           // ExposureTime
+      ent(76, 0x829D, 5, 1, 186);                           // FNumber
+      ent(88, 0x8827, 3, 1, 0, (o) => w16(o, iso));         // ISO（inline）
+      ent(100, 0x9204, 10, 1, 194);                         // ExposureBiasValue（SRATIONAL）
+      ent(112, 0x9209, 3, 1, 0, (o) => w16(o, flash));      // Flash（inline）
+      ent(124, 0xA405, 3, 1, 0, (o) => w16(o, focal35));    // FocalLengthIn35mmFilm（inline）
+      ent(136, 0x9003, 2, 20, 158);                         // DateTimeOriginal
+      w32(148, 0);
+      ws(152, 'Nikon');
+      ws(158, '2026:08:06 12:00:00');
+      w32(178, expNum); w32(182, expDen);
+      w32(186, fNum); w32(190, fDen);
+      i32(194, biasNum); i32(198, biasDen);                 // 負値を入れるので符号付きで書く
+      w16(202, 0); w32(204, 0);                             // GPS IFD（空。読まれないはず）
+      return t;
+    };
+    const cat = (...as) => {
+      const o = new Uint8Array(as.reduce((n, a) => n + a.length, 0));
+      let p = 0; for (const a of as) { o.set(a, p); p += a.length; }
+      return o;
+    };
+    /** 合成 JPEG（SOI + APP1"Exif\0\0"+TIFF + EOI）。 */
+    const jpegExif = (little, v) => {
+      const tiff = buildTiff(little, v);
+      const len = 2 + 6 + tiff.length;
+      return cat(new Uint8Array([0xFF, 0xD8]),
+        new Uint8Array([0xFF, 0xE1, (len >> 8) & 0xFF, len & 0xFF]),
+        new Uint8Array([0x45, 0x78, 0x69, 0x66, 0x00, 0x00]),
+        tiff, new Uint8Array([0xFF, 0xD9])).buffer;
+    };
+    const bytes = (arr) => new Uint8Array(arr).buffer;
+
+    add('E1', 'exif: リトルエンディアン(II) の JPEG APP1 から F値・ISO を読める', () => {
+      const e = parseExif(jpegExif(true));
+      const ok = e && e.format === 'jpeg' && rel(e.fNumber, 1.78, 1e-3) && e.iso === 80
+        && e.make === 'Nikon' && e.model === 'Z6' && e.dateTimeOriginal === '2026:08:06 12:00:00';
+      return { expected: 'jpeg / F1.78 / ISO80 / Nikon Z6', actual: e ? `${e.format} / F${e.fNumber} / ISO${e.iso} / ${e.make} ${e.model}` : 'null', pass: ok };
+    });
+    add('E2', 'exif: ビッグエンディアン(MM) でも同じ値', () => {
+      const a = parseExif(jpegExif(true)), b = parseExif(jpegExif(false));
+      const ok = a && b && a.fNumber === b.fNumber && a.exposureTime === b.exposureTime
+        && a.iso === b.iso && a.focalLength35 === b.focalLength35 && a.model === b.model;
+      return { expected: 'II と MM が一致', actual: b ? `MM: F${b.fNumber} / ${b.exposureTime} / ISO${b.iso}` : 'null', pass: ok };
+    });
+    add('E3', 'exif: FNumber が有理数（1100/100）で 11.0 になる', () => {
+      const e = parseExif(jpegExif(true, { fNum: 1100, fDen: 100 }));
+      const ok = e && e.fNumber === 11;
+      return { expected: '11', actual: e ? String(e.fNumber) : 'null', pass: ok };
+    });
+    add('E4', 'exif: ExposureTime が 1/250 の有理数で 0.004 になる', () => {
+      const e = parseExif(jpegExif(true, { expNum: 1, expDen: 250 }));
+      const ok = e && rel(e.exposureTime, 0.004, 1e-12);
+      return { expected: '0.004', actual: e ? String(e.exposureTime) : 'null', pass: ok };
+    });
+    add('E5', 'exif: EXIF なしの JPEG で値は null、例外を投げない', () => {
+      const e = parseExif(bytes([0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x04, 0x00, 0x00, 0xFF, 0xD9]));
+      const ok = e && e.format === 'jpeg' && e.fNumber === null && e.exposureTime === null && e.iso === null;
+      return { expected: 'jpeg / 値はすべて null', actual: e ? `${e.format} / F${e.fNumber} / ISO${e.iso}` : 'null', pass: ok };
+    });
+    add('E6', 'exif: 壊れたバイト列（APP1 の途中で切断）で null、例外を投げない', () => {
+      let threw = null, e = null;
+      try { e = parseExif(new Uint8Array(jpegExif(true)).slice(0, 40).buffer); } catch (x) { threw = x; }
+      const ok = !threw && e && e.fNumber === null;
+      return { expected: '例外なし / 値は null', actual: threw ? `例外: ${threw.message}` : `F${e && e.fNumber}`, pass: ok };
+    });
+    add('E7', 'exif: GPS タグを含む EXIF から、GPS を含まない結果を返す', () => {
+      // 合成データの IFD0 には 0x8825 が入っている。返り値にその痕跡が無いことを見る
+      const e = parseExif(jpegExif(true));
+      const keys = e ? Object.keys(e) : [];
+      const ok = !!e && !keys.some((k) => /gps|lat|lon|coord/i.test(k))
+        && !Object.values(e).some((v) => typeof v === 'string' && /^\d+\.\d+,/.test(v));
+      return { expected: 'GPS 由来のキーも値も無い', actual: keys.join(','), pass: ok };
+    });
+    add('E8', 'exif: HEIC の先頭バイトで format: heic を返す（パースはしない）', () => {
+      const b = bytes([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63,
+        0, 0, 0, 0, 0x6D, 0x69, 0x66, 0x31, 0x68, 0x65, 0x69, 0x63]);
+      const e = parseExif(b);
+      const ok = e && e.format === 'heic' && e.fNumber === null;
+      return { expected: 'heic / 値は null', actual: e ? `${e.format} / F${e.fNumber}` : 'null', pass: ok };
+    });
+    add('E9', 'exif: RAW（未知の先頭バイト）で format: unknown', () => {
+      const e = parseExif(bytes([0x12, 0x34, 0x56, 0x78, 0x9A]));
+      const ok = e && e.format === 'unknown';
+      return { expected: 'unknown', actual: e ? e.format : 'null', pass: ok };
+    });
+    add('E10', 'exif: ExposureBiasValue が SRATIONAL の負値で正しく読める（−7/10 → −0.7）', () => {
+      const e = parseExif(jpegExif(true, { biasNum: -7, biasDen: 10 }));
+      const mm = parseExif(jpegExif(false, { biasNum: -7, biasDen: 10 }));
+      const ok = e && mm && rel(e.exposureBias, -0.7, 1e-12) && rel(mm.exposureBias, -0.7, 1e-12);
+      return { expected: '−0.7（II / MM とも）', actual: e ? `${e.exposureBias} / ${mm && mm.exposureBias}` : 'null', pass: ok };
+    });
+    add('E11', 'exif: FocalLengthIn35mmFilm（0xA405）が読める', () => {
+      const e = parseExif(jpegExif(true, { focal35: 120 }));
+      const ok = e && e.focalLength35 === 120;
+      return { expected: '120', actual: e ? String(e.focalLength35) : 'null', pass: ok };
+    });
+
+    // ===== 露出計（photocal-spec §8.2）=========================================
+    const PHONE = { fNumber: 1.7799999713880652, exposureTime: 1 / 4405, iso: 80, exposureBias: 0 };
+
+    add('L1', 'lightmeter: F1.8 / 1/1600 / ISO40 / オフセット0 → EV ≈ 13.66', () => {
+      const r = evFromExposure({ fNumber: 1.8, exposureTime: 1 / 1600, iso: 40, exposureBias: 0 }, 0);
+      return { expected: '13.66', actual: r.ev === null ? `null（${r.reason}）` : r.ev.toFixed(4), pass: r.ev !== null && near(r.ev, 13.6618, 0.001) };
+    });
+    add('L2', 'lightmeter: F16 / 1/125 / ISO100 → EV 14.966（**スナップしないので 15.00 ちょうどではない**）', () => {
+      const r = evFromExposure({ fNumber: 16, exposureTime: 1 / 125, iso: 100, exposureBias: 0 }, 0);
+      // 1/125 は 1/128 の公称ラベルだが、EXIF の値は実測なので寄せない。差は 0.034段
+      const ok = r.ev !== null && near(r.ev, 14.9658, 0.001);
+      return { expected: '14.9658（1/128 に寄せたら 15.0000）', actual: r.ev === null ? 'null' : r.ev.toFixed(4), pass: ok };
+    });
+    add('L3', 'lightmeter: L1 にオフセット +1.3 を足すと EV ≈ 14.96', () => {
+      const r = evFromExposure({ fNumber: 1.8, exposureTime: 1 / 1600, iso: 40, exposureBias: 0 }, 1.3);
+      return { expected: '14.9618', actual: r.ev === null ? 'null' : r.ev.toFixed(4), pass: r.ev !== null && near(r.ev, 14.9618, 0.001) };
+    });
+    add('L4', 'lightmeter: ISO が null なら ev: null と理由', () => {
+      const r = evFromExposure({ fNumber: 1.8, exposureTime: 1 / 1600, iso: null, exposureBias: 0 }, 0);
+      const ok = r.ev === null && /ISO/.test(r.reason || '');
+      return { expected: 'null ＋ ISO を含む理由', actual: `${r.ev} / ${r.reason}`, pass: ok };
+    });
+    add('L5', 'lightmeter: ExposureTime が 0 でも ev: null（ゼロ除算を起こさない）', () => {
+      const r = evFromExposure({ fNumber: 1.8, exposureTime: 0, iso: 100, exposureBias: 0 }, 0);
+      const ok = r.ev === null && Number.isFinite(r.ev) === false && /シャッター/.test(r.reason || '');
+      return { expected: 'null（Infinity や NaN ではない）', actual: `${r.ev} / ${r.reason}`, pass: ok };
+    });
+    add('L6', 'lightmeter: SS 1秒以上 かつ ISO3200 以上 で suspectNightMode', () => {
+      const on = evFromExposure({ fNumber: 1.8, exposureTime: 1, iso: 3200, exposureBias: 0 }, 0);
+      const off = evFromExposure({ fNumber: 1.8, exposureTime: 1 / 2, iso: 3200, exposureBias: 0 }, 0);
+      const ok = on.suspectNightMode === true && off.suspectNightMode === false;
+      return { expected: 'true / false', actual: `${on.suspectNightMode} / ${off.suspectNightMode}`, pass: ok };
+    });
+    add('L7', 'lightmeter: solveAeOffset（スマホ実測 vs カメラの公称ラベル）', () => {
+      // カメラ側は公称ラベル F8 / 1/250 / ISO100 → 厳密値 8.0（F.real(18)）と 1/256 に直される
+      const r = solveAeOffset(PHONE, { fNumber: 8, exposureTime: 1 / 250, iso: 100 });
+      // 期待値：EV_camera = log2(F.real(18)²·SS→256) − 0
+      const evCam = Math.log2(F.real(18) ** 2 / SS.real(24));
+      const ok = r.offsetStops !== null && near(r.evCamera, evCam, 1e-9)
+        && near(r.offsetStops, evCam - r.evPhone, 1e-12);
+      return {
+        expected: `カメラ EV ${evCam.toFixed(4)}（厳密値）`,
+        actual: r.offsetStops === null ? `null（${r.reason}）` : `カメラ ${r.evCamera.toFixed(4)} − スマホ ${r.evPhone.toFixed(4)} = ${r.offsetStops.toFixed(4)}段`,
+        pass: ok,
+      };
+    });
+    add('L8', 'lightmeter: solveAeOffset に欠損値 → offsetStops: null と理由', () => {
+      const a = solveAeOffset(PHONE, { fNumber: 8, exposureTime: null, iso: 100 });
+      const b = solveAeOffset({ fNumber: null, exposureTime: 1 / 100, iso: 100, exposureBias: 0 }, { fNumber: 8, exposureTime: 1 / 250, iso: 100 });
+      const ok = a.offsetStops === null && !!a.reason && b.offsetStops === null && /スマホ/.test(b.reason);
+      return { expected: '両方 null ＋ 理由', actual: `カメラ欠損:「${a.reason}」/ スマホ欠損:「${b.reason}」`, pass: ok };
+    });
+
+    // ---- L9 は「EXIF の値をスナップしない」ことの回帰テスト（最重要）----------
+    // スマホの AE は連続値でシャッターを制御する。1/4405 は 1/3段グリッド上に存在しない
+    // （2^-12.105）。`exactGear()` と同じ変換をここに持ち込むと 1/4096・F1.7818・ISO79.37 に
+    // 寄り、EV が 0.09段 ずれる。**その差を判定に使うので、寄せた実装では必ず落ちる。**
+    add('L9', 'lightmeter: 実機の値（F1.78 / 1/4405 / ISO80）で EV 14.09。**スナップしたら落ちる**', () => {
+      // **exif.js と lightmeter.js の両方**を通す。片方だけ見ていると、もう片方に
+      // スナップを入れられても気づけない（実際、合成バイト列を通さない版では
+      // exif.js 側にスナップを入れた変異を捕まえられなかった）。
+      const parsed = parseExif(jpegExif(true));        // 既定値が実機の値そのもの
+      const r = evFromExposure(parsed, 0);
+      const direct = evFromExposure(PHONE, 0);
+      // 1/3段グリッドへ寄せてしまった場合の値を、その場で計算して比較対象にする
+      const snapped = Math.log2(snap(F, PHONE.fNumber).real ** 2 / snap(SS, PHONE.exposureTime).real)
+        - Math.log2(snap(ISO, PHONE.iso).real / 100);
+      const gap = Math.abs(direct.ev - snapped);
+      const ok = r.ev !== null
+        // ① パーサが有理数をそのまま返している（1/4405 は 1/3段グリッド上に無い）
+        && parsed.exposureTime === 1 / 4405 && parsed.iso === 80
+        && Math.abs(parsed.fNumber - 1.7799999713880652) < 1e-12
+        // ② パーサ経由と直接呼びが一致（＝どちらの層でも寄せていない）
+        && near(r.ev, direct.ev, 1e-12)
+        && near(r.ev, 14.0905, 0.002)
+        // ③ 寄せた実装とは 0.09段 離れる＝判別できている
+        && gap > 0.05 && !near(r.ev, snapped, 0.002);
+      return {
+        expected: 'EV 14.0905（スナップ版 14.0000 とは 0.09段 違う）',
+        actual: `EXIF経由 ${r.ev === null ? 'null' : r.ev.toFixed(4)} / 直接 ${direct.ev.toFixed(4)} / スナップ版 ${snapped.toFixed(4)} / 差 ${gap.toFixed(4)}段`,
+        pass: ok,
+      };
+    });
+    add('L10', 'lightmeter: exposureBias が +0.7 のとき EV が 0.7 増える', () => {
+      const base = evFromExposure(PHONE, 0);
+      const biased = evFromExposure({ ...PHONE, exposureBias: 0.7 }, 0);
+      const ok = near(biased.ev - base.ev, 0.7, 1e-12) && biased.exposureBias === 0.7;
+      return { expected: '+0.7000', actual: (biased.ev - base.ev).toFixed(4), pass: ok };
+    });
+    add('L11', 'lightmeter: 注記（露出補正・ナイトモード・別レンズ）が文言として出る', () => {
+      const m = evFromExposure({ fNumber: 1.8, exposureTime: 2, iso: 6400, exposureBias: 0.7 }, 0);
+      const notes = measurementNotes(m, 13, { aeCalibrated: true, aeCalFocal35: 24 });
+      const ok = notes.length === 3 && /ナイトモード/.test(notes[0])
+        && /露出補正 \+0\.7/.test(notes[1]) && /校正 24mm \/ 今回 13mm/.test(notes[2])
+        // 1.5倍未満（24mm vs 28mm）では出さない
+        && lensChangeNote(28, 24) === null;
+      return { expected: '3件（ナイトモード／露出補正／別レンズ）＋ 28mm では出ない', actual: notes.join(' | '), pass: ok };
+    });
+
+    // ===== 統合（photocal-spec §8.3）===========================================
+    add('I1', '測定 EV がシーンEV として compute() に流れ、日中シンクロの結果が変わる', () => {
+      const base = {
+        intent: 'daylightSync', camera: { isoMin: 200 }, lens: { fMin: F28, fMax: 22 },
+        flash: { profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: -1, powerMode: 'auto' },
+      };
+      const chip = compute(makeState(mergeDeep(base, { scene: { key: 'sunny', evBase: 15, adjust: 0 } })));
+      const meas = compute(makeState(mergeDeep(base, { scene: { key: MEASURED_SCENE_KEY, evBase: 14.0905, adjust: 0 } })));
+      // 壁（同調速度で越えられない段数）は EV に直結する。0.91段 低ければ壁も 0.91段 低い
+      const ok = rel(chip.evScene, 15, 1e-12) && rel(meas.evScene, 14.0905, 1e-12)
+        && meas.measuredScene === true && chip.measuredScene === false
+        && near(chip.wall.stops - meas.wall.stops, 0.9095, 0.01);
+      return {
+        expected: '壁が 0.91段 下がる / measuredScene: true',
+        actual: `EV${chip.evScene}→${meas.evScene} / 壁 ${chip.wall.stops.toFixed(3)}→${meas.wall.stops.toFixed(3)}段`,
+        pass: ok,
+      };
+    });
+    add('I2', '未校正のとき phone.aeCalibrated が false でバッジ用のフラグが立つ', () => {
+      const un = compute(makeState());
+      const cal = compute(makeState({ phone: { aeOffsetStops: -1.2, aeCalibrated: true, aeCalFocal35: 24 } }));
+      const ok = makeState().phone.aeCalibrated === false
+        && un.phoneUncalibrated === true && cal.phoneUncalibrated === false;
+      return { expected: '既定 false / 未校正 true / 校正済み false', actual: `${un.phoneUncalibrated} / ${cal.phoneUncalibrated}`, pass: ok };
+    });
+    add('I3', '測定値のシーンでは白飛び判定が黙る（コントラストが分からないため）', () => {
+      // 快晴（contrast 2.5）+ 逆光（+2.0）= 4.5段 でヘッドルーム3段を超えるので通常は警告が出る
+      const base = {
+        intent: 'daylightSync', camera: { isoMin: 200 }, lens: { fMin: F28, fMax: 22 },
+        flash: { profileId: 'p1', modifier: 'reflector', distance: 3, ambientOffset: 0, backlit: true, powerMode: 'auto' },
+      };
+      const chip = compute(makeState(mergeDeep(base, { scene: { key: 'sunny', evBase: 15, adjust: 0 } })));
+      const meas = compute(makeState(mergeDeep(base, { scene: { key: MEASURED_SCENE_KEY, evBase: 15, adjust: 0 } })));
+      const has = (d) => d.warnings.some((w) => w.helpId === HELP.blowout);
+      const ok = has(chip) === true && has(meas) === false;
+      return { expected: 'チップ:警告あり / 測定:警告なし', actual: `${has(chip)} / ${has(meas)}`, pass: ok };
     });
 
     add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {
