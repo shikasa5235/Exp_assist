@@ -66,7 +66,7 @@
       daylightSync, slowSyncAmbient, ndCountWarnings, formatStops, ndAdvice,
     } from './js/advisor.js';
     import { SUBJECTS, POWER_STEPS, HELP } from './js/scenes.js';
-    import { compute } from './js/compute.js';
+    import { compute, clampManual } from './js/compute.js';
     import { makeState, migrate, mergeDeep, clampPanelSize } from './js/state.js';
     // wheel.js から純粋関数だけを取る（makeWheel は DOM を作るのでここでは使わない）
     import { indexFromDrag } from './js/wheel.js';
@@ -955,20 +955,20 @@
     // ===== ホイールのドラッグ量→インデックス（ジェスチャ境界の保険）================
     // 実機で「横スワイプ中に縦スクロールが挟まるとダイアルが飛ぶ」不具合が出た。
     // 原因は pointercancel が確定処理に繋がっていたことだが、同じ形のバグを防ぐため
-    // 位置の計算を純粋関数に切り出した。**引数がこの4つだけなら累積の誤りが起こり得ない。**
+    // 位置の計算を純粋関数に切り出した。**引数がこの5つだけなら累積の誤りが起こり得ない。**
     const STEP_PX = 26; // js/wheel.js の STEP と同じ（CSS の --wheel-step）
     add('D1', 'ホイール: 移動量が 1/3段の 2.4倍 → 開始位置 +2（四捨五入）', () => {
-      const got = indexFromDrag(5, 2.4 * STEP_PX, STEP_PX, 40);
+      const got = indexFromDrag(5, 2.4 * STEP_PX, STEP_PX, 0, 39);
       return { expected: '7', actual: String(got), pass: got === 7 };
     });
     add('D2', 'ホイール: 同じ移動量を10回に分けて渡しても結果が同じ（累積を持たない）', () => {
       const total = 2.4 * STEP_PX;
-      const once = indexFromDrag(5, total, STEP_PX, 40);
+      const once = indexFromDrag(5, total, STEP_PX, 0, 39);
       // pointermove が細かく飛んでくる状況を再現する。関数は毎回「開始点からの総量」を受け取る
       let running = 0, last = null;
       for (let i = 0; i < 10; i++) {
         running += total / 10;
-        last = indexFromDrag(5, running, STEP_PX, 40);
+        last = indexFromDrag(5, running, STEP_PX, 0, 39);
       }
       return {
         expected: `一括 ${once} と分割 ${once} が一致`,
@@ -976,11 +976,86 @@
         pass: once === last && once === 7,
       };
     });
-    add('D3', 'ホイール: 範囲外は 0..len-1 にクランプされる', () => {
-      const lo = indexFromDrag(2, -99 * STEP_PX, STEP_PX, 40);   // 下へ振り切る
-      const hi = indexFromDrag(2, 99 * STEP_PX, STEP_PX, 40);    // 上へ振り切る
+    add('D3', 'ホイール: 範囲を絞らなければ 0..len-1 にクランプされる（従来の挙動）', () => {
+      const lo = indexFromDrag(2, -99 * STEP_PX, STEP_PX, 0, 39);   // 下へ振り切る
+      const hi = indexFromDrag(2, 99 * STEP_PX, STEP_PX, 0, 39);    // 上へ振り切る
       const ok = lo === 0 && hi === 39;
       return { expected: '0 / 39', actual: `${lo} / ${hi}`, pass: ok };
+    });
+
+    // ===== 計算タブのダイアルの範囲制限 =========================================
+    // 設定した機材の限界を超える値をダイアルできてしまう問題への対応。
+    // **物理的な限界だけを制限し、好み（実用ISO上限）は制限しない。** R5 がその回帰テスト。
+    add('R1', 'ホイール: indexFromDrag が minIndex / maxIndex でクランプされる', () => {
+      const lo = indexFromDrag(20, -99 * STEP_PX, STEP_PX, 9, 27);  // 下へ振り切る → 9 で止まる
+      const hi = indexFromDrag(20, 99 * STEP_PX, STEP_PX, 9, 27);   // 上へ振り切る → 27 で止まる
+      const inRange = indexFromDrag(20, 2 * STEP_PX, STEP_PX, 9, 27); // 範囲内はそのまま
+      const ok = lo === 9 && hi === 27 && inRange === 22;
+      return { expected: '9 / 27 / 22', actual: `${lo} / ${hi} / ${inRange}`, pass: ok };
+    });
+    add('R2', 'ホイール: 範囲付きでも分割して渡した結果が一括と一致する（D2 の範囲付き版）', () => {
+      // 限界を越える量を投げる。分割の途中でクランプが効いても、最終値は一括と同じでなければ
+      // ならない（クランプは毎回「開始点からの総量」に対して掛かるので累積されない）
+      const total = 40 * STEP_PX;
+      const once = indexFromDrag(20, total, STEP_PX, 9, 27);
+      let running = 0, last = null;
+      for (let i = 0; i < 10; i++) { running += total / 10; last = indexFromDrag(20, running, STEP_PX, 9, 27); }
+      return {
+        expected: `一括 27 と分割 27 が一致`,
+        actual: `一括 ${once} / 分割 ${last}`,
+        pass: once === last && once === 27,
+      };
+    });
+
+    /** 計算タブの状態を作る（ダイアルの範囲テスト用）。 */
+    const calcState = (over = {}) => makeState(mergeDeep({
+      ui: { tab: 'calc', theme: 'auto', firstRun: false },
+      scene: { evBase: 12, adjust: 0 },
+      camera: { isoMin: 200, expandedISOMin: 50, isoMax: 6400, allowExpandedIso: false, maxSS: 1 / 8000 },
+      lens: { fMin: F28, fMax: 22 },
+      manual: { fIndex: 9, ssIndex: 24, isoIndex: null, locks: { f: true, ss: true, iso: false } },
+    }, over));
+
+    add('R3', 'ダイアル: 拡張ISO OFF なら ISO の下限インデックスが 200 相当', () => {
+      const off = compute(calcState()).manual.limits.iso;
+      const on = compute(calcState({ camera: { allowExpandedIso: true } })).manual.limits.iso;
+      // ラベルまで見る（インデックスだけだと系列がずれたときに気づけない）
+      const ok = ISO.label(off.min) === '200' && ISO.label(on.min) === '50'
+        && /拡張ISO を使うと50まで下がります/.test(off.loMessage);
+      return {
+        expected: 'OFF→ISO200 / ON→ISO50 / 文言に拡張ISO の案内',
+        actual: `OFF→ISO${ISO.label(off.min)} / ON→ISO${ISO.label(on.min)} / 「${off.loMessage}」`,
+        pass: ok,
+      };
+    });
+    add('R4', 'ダイアル: 拡張ISO を ON→OFF すると ISO100 が 200 にクランプされ通知が返る', () => {
+      // 拡張ISO ON のあいだに ISO100（index 3）を選んでいた状態で OFF にした場面
+      const st = calcState({ camera: { allowExpandedIso: false }, manual: { isoIndex: 3, locks: { f: true, ss: false, iso: true } } });
+      const fix = clampManual(st);
+      // ON のままなら是正しない（下限 50 なので ISO100 は範囲内）
+      const noFix = clampManual(calcState({ camera: { allowExpandedIso: true }, manual: { isoIndex: 3, locks: { f: true, ss: false, iso: true } } }));
+      const ok = !!fix && fix.manual.isoIndex === 6 && ISO.label(6) === '200'
+        && fix.notices.length === 1 && /ISO を 200 に変更しました（拡張ISO が無効のため）/.test(fix.notices[0])
+        && noFix === null;
+      return {
+        expected: 'isoIndex 3→6（ISO200）＋通知1件 / ON のときは null',
+        actual: fix ? `${fix.manual.isoIndex}（ISO${ISO.label(fix.manual.isoIndex)}）「${fix.notices[0]}」/ ON:${noFix === null ? 'null' : '是正あり'}` : '是正なし',
+        pass: ok,
+      };
+    });
+    add('R5', 'ダイアル: 実用ISO上限を超える位置もダイアルできる（好みは制限しない）', () => {
+      // **回帰テスト。** 将来「上限も制限すべき」と考えた人が変更したらここが落ちる。
+      // ノイズを許容して上げる判断はユーザーのもので、既存の高感度警告が別に伝える。
+      const d = compute(calcState({ camera: { isoMax: 6400 } }));
+      const lim = d.manual.limits.iso;
+      const above = ISO.indexFor(12800); // 実用上限の1段上
+      const ok = lim.max === ISO.maxIndex && above <= lim.max && lim.hiMessage === null
+        && clampManual(calcState({ manual: { isoIndex: above, locks: { f: true, ss: false, iso: true } } })) === null;
+      return {
+        expected: `上限は系列の端 ${ISO.maxIndex}（ISO${ISO.label(ISO.maxIndex)}）／ISO12800 は選べる／是正されない`,
+        actual: `上限 ${lim.max}（ISO${ISO.label(lim.max)}）／ISO12800 の index ${above}`,
+        pass: ok,
+      };
     });
 
     add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {

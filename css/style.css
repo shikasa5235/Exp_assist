@@ -310,6 +310,15 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
   position: absolute; top: 6px; font-family: var(--font-num); font-variant-numeric: tabular-nums;
   font-size: 11px; color: var(--ink-2); white-space: nowrap;
 }
+/* 機材の限界の外（UI仕様 §3）。**目盛りは消さずグレーで残す** — どこが限界かが見えるほうが
+   「なぜここで止まるのか」が分かる。消すと限界がホイールの端と区別できなくなる。
+   区切り線は限界の位置にだけ引く（系列の端＝外に目盛りが無い側には引かない）。 */
+.wheel-tick.is-out { opacity: .35; }
+.wheel-tick.limit-lo::after, .wheel-tick.limit-hi::after {
+  content: ""; position: absolute; top: 4px; bottom: 4px; width: 1px; background: var(--rule);
+}
+.wheel-tick.limit-lo::after { left: 0; }
+.wheel-tick.limit-hi::after { right: 0; }
 .wheel-pointer {
   position: absolute; left: 50%; top: 4px; bottom: 4px; width: 2px; transform: translateX(-1px);
   background: var(--accent); border-radius: 1px; pointer-events: none;

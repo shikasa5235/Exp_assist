@@ -8,7 +8,7 @@
 //
 // 8c-1 の範囲：配線骨格＋タブ1（かんたん）。タブ2/3・校正は 8c-2。
 
-import { compute } from './compute.js';
+import { compute, clampManual } from './compute.js';
 import { formatStops } from './advisor.js';
 import {
   SCENES, SUBJECTS, MODIFIERS, POWER_STEPS, AMBIENT_OFFSETS,
@@ -101,6 +101,15 @@ function cacheElements() {
  */
 export function setState(patch, { persist = true } = {}) {
   state = mergeDeep(state, patch);
+  // 機材設定を変えると、保存済みのダイアル値が範囲外になることがある
+  // （拡張ISO を OFF にしたまま ISO100 のまま等）。**compute の前に state を是正する。**
+  // 表示側でクランプすると state と画面が食い違い、設定を戻した瞬間に古い値が蘇る。
+  // 範囲の計算そのものは compute.js（純粋）にある。ここは当てて知らせるだけ。
+  const fix = clampManual(state);
+  if (fix) {
+    state = mergeDeep(state, { manual: fix.manual });
+    toast(fix.notices.join('／')); // 黙って値を変えない。トーストは1枠なので繋げて出す
+  }
   derived = compute(state);
   render();
   // 保存できない環境（プライベートブラウズ等）では黙って落とさず1度だけ知らせる。
@@ -787,7 +796,15 @@ function buildCalcTracks() {
     const name = document.createElement('span'); name.className = 'track-name'; name.textContent = series;
     col1.append(lock, name);
     const w = makeWheel(descFor(series), {
-      interactive: true, onCommit: (index) => setState({ manual: { [`${key}Index`]: index } }),
+      interactive: true,
+      onCommit: (index) => setState({ manual: { [`${key}Index`]: index } }),
+      // 限界に当たったときの文言は derived が持つ（限界の計算も文言も compute.js の仕事）。
+      // 呼ばれるのは「同じ限界に当たり続ける間は1回だけ」で、抑制は wheel.js が持つ。
+      onLimit: (side) => {
+        const lim = derived.manual && derived.manual.limits[key];
+        const msg = lim && (side === 'lo' ? lim.loMessage : lim.hiMessage);
+        if (msg) toast(msg);
+      },
     });
     const cur = document.createElement('span'); cur.className = 'track-cur tabular';
     row.append(col1, w.root, cur);
@@ -826,6 +843,9 @@ function renderCalc() {
     const locked = key !== m.computedKey;
     const slot = wheels.calc[key];
     slot.wheel.setInteractive(locked);
+    // 範囲はロック状態に関係なく毎回与える。**限界は機材の性質でロックの都合ではない。**
+    // ロックを切り替えるたびにグレーが出入りすると、同じ軸が別物に見える
+    slot.wheel.setLimits(m.limits[key].min, m.limits[key].max);
     slot.wheel.setIndex(m[key].index, { animate: true });
     slot.lock.setAttribute('aria-pressed', String(locked));
     slot.lock.querySelector('use').setAttribute('href', locked ? '#i-lock' : '#i-unlock');

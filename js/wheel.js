@@ -6,23 +6,28 @@
 const STEP = 26; // 1/3段あたりの px（CSS の --wheel-step と合わせる）
 
 /**
- * ドラッグ量から確定インデックスを求める。**この4引数だけで決まる純粋関数。**
+ * ドラッグ量から確定インデックスを求める。**この5引数だけで決まる純粋関数。**
  *
  * 状態を持たないので、途中の `pointermove` が何回来ても、どの粒度で来ても結果が変わらない
  * （累積の誤りが構造的に起こり得ない）。ジェスチャ境界の不具合はここに入り込めない。
  *
  * 配列位置（0..len-1）で扱う。系列インデックス（SS は −15 始まり）への変換は呼び出し側の仕事。
  *
+ * **クランプ範囲を引数で受ける。** 機材の限界（開放F値・ISO下限・最高速SS）は系列の端とは
+ * 別物で、しかも設定で動く。ここに `len` しか渡せないと限界の判定が呼び出し側に散る。
+ * 範囲を絞らないときは `0, len-1` を渡せば従来と同じ挙動になる。
+ *
  * @param {number} startIndex ジェスチャ開始時の配列位置（0..len-1）
  * @param {number} totalDxPx 開始点からの移動量(px)。**正でインデックスが増える向き**
  *   （ホイールは指を左へ動かすと値が上がるので、呼び出し側は `startX − currentX` を渡す）
  * @param {number} stepPx 1/3段あたりの px
- * @param {number} len ラベル数
- * @returns {number} 0..len-1 にクランプした整数
+ * @param {number} minIndex 選べる最小の配列位置
+ * @param {number} maxIndex 選べる最大の配列位置
+ * @returns {number} minIndex..maxIndex にクランプした整数
  */
-export function indexFromDrag(startIndex, totalDxPx, stepPx, len) {
+export function indexFromDrag(startIndex, totalDxPx, stepPx, minIndex, maxIndex) {
   const raw = Math.round(startIndex + totalDxPx / stepPx);
-  return Math.max(0, Math.min(len - 1, raw));
+  return Math.max(minIndex, Math.min(maxIndex, raw));
 }
 
 /**
@@ -36,14 +41,25 @@ export function indexFromDrag(startIndex, totalDxPx, stepPx, len) {
 /**
  * ホイールを生成する。
  * @param {WheelDesc} desc
- * @param {{interactive?:boolean, onCommit?:(index:number)=>void}} [opts]
- * @returns {{root:HTMLElement, setIndex:Function, setInteractive:Function, get index():number}}
+ * @param {{interactive?:boolean, onCommit?:(index:number)=>void,
+ *          onLimit?:(side:'lo'|'hi')=>void}} [opts]
+ *   onLimit は**限界を越えようとしたときに一度だけ**呼ばれる（同じ側に当たり続ける間は鳴らない）。
+ *   何を言うかはここでは決めない（文言は derived が持つ。ui.js が受け取って出す）。
+ * @returns {{root:HTMLElement, setIndex:Function, setInteractive:Function,
+ *            setLimits:Function, get index():number}}
  */
 export function makeWheel(desc, opts = {}) {
   const { labels, minIndex, majorEvery = 3, valueText } = desc;
   const maxIndex = minIndex + labels.length - 1;
   let interactive = !!opts.interactive;
   const onCommit = opts.onCommit || (() => {});
+  const onLimit = opts.onLimit || (() => {});
+
+  // 選べる範囲（系列インデックス）。**既定は系列いっぱい＝制限なし。**
+  // setLimits を呼ばなければ従来どおり動く（結果パネルの読み取り専用トラックはこの状態）。
+  let limLo = minIndex, limHi = maxIndex;
+  /** @type {'lo'|'hi'|null} 直近に当たった限界。同じ側の連続通知を抑える */
+  let lastLimit = null;
 
   const root = document.createElement('div');
   root.className = 'wheel';
@@ -54,7 +70,8 @@ export function makeWheel(desc, opts = {}) {
 
   const track = document.createElement('div');
   track.className = 'wheel-track';
-  labels.forEach((label, i) => {
+  /** @type {HTMLElement[]} 目盛り要素（グレーアウトの付け外しで引く） */
+  const ticks = labels.map((label, i) => {
     const idx = minIndex + i;
     const tick = document.createElement('span');
     tick.className = 'wheel-tick' + ((idx - minIndex) % majorEvery === 0 ? ' major' : '');
@@ -65,12 +82,48 @@ export function makeWheel(desc, opts = {}) {
       tick.appendChild(lab);
     }
     track.appendChild(tick);
+    return tick;
   });
   const pointer = document.createElement('div');
   pointer.className = 'wheel-pointer';
   root.append(track, pointer);
 
   let index = minIndex;
+
+  /**
+   * 選べる範囲を与える。**範囲外の目盛りは消さずグレーで残す**（どこが限界かが見える）。
+   * 限界の位置には区切り線を入れる（外側に目盛りが残っているときだけ）。
+   * @param {number} lo 系列インデックスの下限
+   * @param {number} hi 系列インデックスの上限
+   */
+  function setLimits(lo, hi) {
+    const nextLo = clamp(Math.round(lo), minIndex, maxIndex);
+    const nextHi = clamp(Math.round(hi), nextLo, maxIndex);
+    // **変化が無ければ何もしない。** render は setState のたびに走るので、ここで毎回
+    // lastLimit を消すと「同じ限界に当たり続ける間は1回だけ」が成立しなくなる
+    // （限界に当たって値が動いた回の再描画が、次のジェスチャの抑制を解いてしまう）。
+    if (nextLo === limLo && nextHi === limHi) return;
+    limLo = nextLo; limHi = nextHi;
+    lastLimit = null; // 範囲そのものが変わったときだけ抑制を解く
+    ticks.forEach((tick, i) => {
+      const idx = minIndex + i;
+      tick.classList.toggle('is-out', idx < limLo || idx > limHi);
+      // 区切り線は「外側に目盛りが残っている側」にだけ引く。系列の端は限界ではない
+      tick.classList.toggle('limit-lo', idx === limLo && limLo > minIndex);
+      tick.classList.toggle('limit-hi', idx === limHi && limHi < maxIndex);
+    });
+    // 支援技術には**操作できる範囲**を伝える（系列の端ではなく機材の限界）
+    root.setAttribute('aria-valuemin', String(limLo));
+    root.setAttribute('aria-valuemax', String(limHi));
+    root.classList.toggle('wheel-edge', index === limLo || index === limHi);
+  }
+
+  /** 限界に当たったことを一度だけ外へ知らせる。 */
+  function noteLimit(side) {
+    if (lastLimit === side) return; // 同じ限界に当たり続ける間は鳴らさない
+    lastLimit = side;
+    onLimit(side);
+  }
 
   /** track を index が中央（指針）に来る位置へ動かす。 */
   function place(animate) {
@@ -79,12 +132,16 @@ export function makeWheel(desc, opts = {}) {
     track.style.transform = `translateX(${offset}px)`;
   }
 
-  /** 外部（render）から現在値を与える。 */
+  /**
+   * 外部（render）から現在値を与える。
+   * **限界ではクランプしない。** state が範囲外なら範囲外のまま映す（食い違いを隠さない）。
+   * 保存済み値が範囲外になったときの是正は setState 側の仕事（compute.clampManual）。
+   */
   function setIndex(i, { animate = true } = {}) {
     index = clamp(Math.round(i), minIndex, maxIndex);
     root.setAttribute('aria-valuenow', String(index));
     if (valueText) root.setAttribute('aria-valuetext', valueText(index));
-    root.classList.toggle('wheel-edge', index === minIndex || index === maxIndex);
+    root.classList.toggle('wheel-edge', index === limLo || index === limHi);
     place(animate);
   }
 
@@ -115,18 +172,23 @@ export function makeWheel(desc, opts = {}) {
   });
   root.addEventListener('pointermove', (e) => {
     if (!drag || e.pointerId !== drag.pointerId) return; // 別の指のイベントは無視する
-    // 追従（未確定）。丸めずに連続値で動かす
-    const live = clamp(drag.startIndex + (drag.startX - e.clientX) / STEP, minIndex, maxIndex);
+    // 追従（未確定）。丸めずに連続値で動かす。**限界でそこに止まる**（範囲外へは動かない）
+    const live = clamp(drag.startIndex + (drag.startX - e.clientX) / STEP, limLo, limHi);
     track.style.transform = `translateX(${-((live - minIndex) * STEP + STEP / 2)}px)`;
   });
 
   root.addEventListener('pointerup', (e) => {
     if (!drag || e.pointerId !== drag.pointerId) return;
     // 指を離した位置だけで決める。累積を持たないので途中の move が何回来ても結果は同じ
-    const pos = indexFromDrag(drag.startIndex - minIndex, drag.startX - e.clientX, STEP, labels.length);
+    const startPos = drag.startIndex - minIndex, dx = drag.startX - e.clientX;
+    const pos = indexFromDrag(startPos, dx, STEP, limLo - minIndex, limHi - minIndex);
+    // 限界が無ければどこへ行ったか。ずれていれば範囲外へ出ようとしたということ
+    const wanted = indexFromDrag(startPos, dx, STEP, 0, labels.length - 1);
     const committed = pos + minIndex;
     clearDrag();
     navigator.vibrate?.(8);
+    if (wanted !== pos) noteLimit(wanted < pos ? 'lo' : 'hi');
+    else lastLimit = null; // 範囲内に戻ったので次に当たったらまた鳴らす
     if (committed !== index) onCommit(committed);
     else place(true); // 変化なしなら元位置へスナップ
   });
@@ -148,14 +210,21 @@ export function makeWheel(desc, opts = {}) {
   });
 
   // ---- 入力（キーボード）：1/3段ずつ ----
+  // ドラッグと同じ範囲・同じ通知規則にする（片方だけ限界を越えられると state が食い違う）
   root.addEventListener('keydown', (e) => {
     if (!interactive) return;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') { e.preventDefault(); onCommit(clamp(index + 1, minIndex, maxIndex)); }
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') { e.preventDefault(); onCommit(clamp(index - 1, minIndex, maxIndex)); }
+    const dir = (e.key === 'ArrowRight' || e.key === 'ArrowUp') ? 1
+      : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? -1 : 0;
+    if (!dir) return;
+    e.preventDefault();
+    const next = clamp(index + dir, limLo, limHi);
+    if (next === index) { noteLimit(dir > 0 ? 'hi' : 'lo'); return; }
+    lastLimit = null;
+    onCommit(next);
   });
 
   setInteractive(interactive);
-  return { root, setIndex, setInteractive, get index() { return index; } };
+  return { root, setIndex, setInteractive, setLimits, get index() { return index; } };
 }
 
 function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }

@@ -642,6 +642,91 @@ function manualResult(ev, st) {
   return { ...snapTriple(fReal, ssReal, isoReal), computedKey, warning, ndSlack };
 }
 
+/* ---- 計算タブ：ダイアルで選べる範囲 ------------------------------------ */
+
+/**
+ * 計算タブのダイアルが選べる範囲を系列インデックスで返す。
+ *
+ * **物理的な限界だけを制限し、好みの判断は制限しない。**
+ *   制限する   F 開放〜最小絞り／ISO 下限／SS 系列最遅〜最高速
+ *   制限しない 実用ISO上限（`camera.isoMax`）。ノイズを許容して上げる判断はユーザーのもの。
+ *              高感度警告が別に出る（発光量の上限を fixed に適用して不具合になったのと同じ構造。
+ *              MAINTENANCE.md §12.3）
+ *
+ * ISO の下限を制限してよいのは、拡張ISO トグルが同じ画面にあり1タップで解除できるため。
+ * 設定タブへ行かないと外せない制限にはしない。
+ *
+ * @param {object} st exactGear 済みの状態
+ * @returns {{f:object, ss:object, iso:object}} 軸ごとの {min,max,loMessage,hiMessage}
+ */
+function manualLimits(st) {
+  const fLo = snap(F, st.lens.fMin), fHi = snap(F, st.lens.fMax);
+  const ssHi = snap(SS, st.camera.maxSS);
+  const isoLo = snap(ISO, isoFloorOf(st));
+  const expanded = snap(ISO, st.camera.expandedISOMin);
+  return {
+    f: {
+      min: fLo.index, max: fHi.index,
+      loMessage: `開放F${fLo.label} が下限です（設定タブで変更できます）`,
+      hiMessage: `最小絞りF${fHi.label} が上限です（設定タブで変更できます）`,
+    },
+    ss: {
+      // 下限は系列の端（30″）。その外に目盛りが無いので区切り線も出ない
+      min: SS.minIndex, max: ssHi.index,
+      loMessage: `${SS.label(SS.minIndex)} が最も遅いシャッター速度です`,
+      hiMessage: `${ssHi.label} が上限です（設定タブで変更できます）`,
+    },
+    iso: {
+      min: isoLo.index, max: ISO.maxIndex, // **上限は制限しない**
+      loMessage: st.camera.allowExpandedIso
+        ? `ISO${isoLo.label} が下限です（設定タブで変更できます）`
+        : `ISO${isoLo.label} が下限です（拡張ISO を使うと${expanded.label}まで下がります）`,
+      hiMessage: null,
+    },
+  };
+}
+
+/** 是正したことを伝える文言。**黙って値を変えない。** */
+function clampNotice(key, st, index, side) {
+  if (key === 'f') {
+    return `F を ${F.label(index)} に変更しました（レンズの${side === 'lo' ? '開放F値' : '最小絞り'}の範囲外のため）`;
+  }
+  if (key === 'ss') {
+    return `SS を ${SS.label(index)} に変更しました（カメラのシャッター速度の範囲外のため）`;
+  }
+  const why = st.camera.allowExpandedIso ? '下限を下回るため' : '拡張ISO が無効のため';
+  return `ISO を ${ISO.label(index)} に変更しました（${why}）`;
+}
+
+/**
+ * 保存済みのダイアル値が機材設定の変更で範囲外になっていないか調べ、是正案を返す。
+ *
+ * **純粋関数。** state を書き換えず、当てるべきパッチと通知文だけを返す。
+ * 適用は `ui.setState` の1箇所（`compute()` で表示だけ直すと state と表示が食い違う）。
+ *
+ * 例：拡張ISO を ON→OFF（下限 50→200）したまま ISO100 を選択中／
+ *     設定タブで開放F値を 1.4→2.8 に変えたときダイアルが F1.8。
+ *
+ * @param {object} input アプリ状態（公称値のままでよい）
+ * @returns {{manual:object, notices:string[]}|null} 是正不要なら null
+ */
+export function clampManual(input) {
+  if (!input || !input.manual) return null;
+  const st = exactGear(input);
+  const lim = manualLimits(st);
+  const manual = {}, notices = [];
+  ['f', 'ss', 'iso'].forEach((key) => {
+    const cur = st.manual[`${key}Index`];
+    if (cur == null) return; // 未確定の軸は触らない（既定値で補完される）
+    const { min, max } = lim[key];
+    const next = Math.max(min, Math.min(max, cur));
+    if (next === cur) return;
+    manual[`${key}Index`] = next;
+    notices.push(clampNotice(key, st, next, next === min ? 'lo' : 'hi'));
+  });
+  return notices.length ? { manual, notices } : null;
+}
+
 /**
  * クランプ警告を作る。1/3段未満のズレは警告しない（表示の丸め幅に埋もれるため）。
  * @param {{axis:string}} spec
@@ -758,6 +843,8 @@ function computeAmbient(st, evScene, d) {
  */
 function computeManual(st, evScene, prof, modLoss, d) {
   const m = manualResult(evScene, st);
+  // ダイアルで選べる範囲。**限界の計算はここだけ**（ui.js は受け取って wheel に渡すだけ）
+  m.limits = manualLimits(st);
   d.manual = m;
   d.mainFIndex = m.f.index;
   d.ambient = {
