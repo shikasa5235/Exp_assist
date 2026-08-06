@@ -154,11 +154,15 @@
       <div class="flash-panel" id="flash-panel" hidden>
         <div class="field-label flash-head"><svg class="icon" aria-hidden="true"><use href="#i-flash"></use></svg>ストロボ</div>
         <div class="field">
-          <label class="field-label" for="flash-profile">プロファイル</label>
+          <!-- ラベルとバッジを同じ行に置く。バッジを select の後ろに置くと下へ回り込み、
+               当たり判定を広げるための負マージンでプルダウンに重なる（実機で発生） -->
+          <div class="label-row">
+            <label class="field-label" for="flash-profile">プロファイル</label>
+            <!-- 押すと校正のしかた（マニュアル §12）を開く。data-help は警告の ? と同じ委譲で処理 -->
+            <button type="button" class="badge badge-est badge-link" id="uncalibrated-badge"
+                    data-help="help-calibration" aria-label="推定値（未校正）。校正のしかたを開く" hidden>推定値（未校正）</button>
+          </div>
           <select class="select" id="flash-profile"></select>
-          <!-- 押すと校正のしかた（マニュアル §12）を開く。data-help は警告の ? と同じ委譲で処理 -->
-          <button type="button" class="badge badge-est badge-link" id="uncalibrated-badge"
-                  data-help="help-calibration" aria-label="推定値（未校正）。校正のしかたを開く" hidden>推定値（未校正）</button>
         </div>
         <div class="field">
           <label class="field-label" for="flash-modifier">モディファイア</label>

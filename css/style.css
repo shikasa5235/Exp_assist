@@ -257,14 +257,31 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 /* ---- バッジ ------------------------------------------------------- */
 .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: var(--r-pill); margin-left: 8px; }
 .badge-est { color: var(--warn); border: 1px solid var(--warn); }
-/* 押せるバッジ（校正のしかたへ飛ぶ）。見た目は小さくても当たり判定は 44px 以上にする。
-   行高を膨らませないため、はみ出す分は負マージンで吸収する（.warn-help と同じ手当て）。 */
+/* 押せるバッジ（校正のしかたへ飛ぶ）。見た目は小さいまま当たり判定だけ 44px にする。
+
+   **`.warn-help` の「min-height + 負マージン」をここに流用しないこと。** あちらは枠線が
+   無いので 44px の箱が見えないが、`.badge-est` は枠線を持つので 44px の縦長ピルとして
+   描かれ、負マージンで上下へはみ出した分が隣の要素（プロファイルの select）に重なる。
+   実機で発生した。当たり判定は擬似要素で広げ、**箱そのものは文字の高さに保つ。** */
 .badge-link {
+  position: relative;
   background: transparent; font: inherit; font-size: 11px; font-weight: 600;
-  min-height: var(--tap-min); margin-top: -10px; margin-bottom: -10px;
   text-decoration: underline; text-underline-offset: 2px;
 }
+.badge-link::after {
+  content: ""; position: absolute; left: 0; right: 0; top: 50%;
+  height: var(--tap-min); transform: translateY(-50%);
+}
 .badge-link:active { background: var(--press); }
+
+/* ラベルとバッジを同じ行に置く枠。ラベルは左、バッジは右端。
+   バッジは縮めず（flex: none）、収まらないときは折り返して次行へ落とす（320px 対策）。 */
+.label-row {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: var(--gap-tap); margin-bottom: 8px;
+}
+.label-row .field-label { margin-bottom: 0; min-width: 0; }
+.label-row > .badge { flex: none; margin-left: 0; }
 
 /* ===== ストロボパネル ============================================= */
 .flash-panel {
