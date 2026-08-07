@@ -293,6 +293,13 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .meter-notes { color: var(--warn); margin-top: 8px; }
 .meter-notes:empty { display: none; }
 .meter-privacy { margin-top: 8px; }
+/* 出所バッジ（EXIF から入った値）。手で上書きすると JS 側で hidden になる */
+.badge-src { color: var(--ink-2); border: 1px solid var(--rule); flex: none; margin-left: 0; }
+/* 読み取り結果は「機種 / 日時」と「F・SS・ISO…」の2行。改行を保つ */
+.cal-readout { white-space: pre-line; margin-top: 8px; }
+.cal-readout.is-error { color: var(--alert); }
+.cal-history { margin-top: 12px; }
+.cal-history th { font-weight: 600; text-align: left; }
 
 /* ===== ストロボパネル ============================================= */
 .flash-panel {

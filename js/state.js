@@ -55,9 +55,15 @@ export const defaultState = {
   // minPowerStops = 弱い側の限界（7 = 1/128）。powerCeilingStops = 強い側の限界（2 = 1/4）。
   // 段数は 1/1=0 … 1/128=7 なので、上限（強い側）のほうが数値は小さい。取り違えないこと。
   // cal = モディファイアごとの実測 k（{ reflector: 2.33, … }）。無い組み合わせは未校正で k を推定に使う。
+  //
+  // calMeta = 校正の出所（{ reflector: { model, date } }）。**cal とは別キーにしてある。**
+  //   cal[mod] を数値からオブジェクトに変えると §9 の「意味の変更」に当たり schemaVersion を
+  //   上げて移送が要る。移送の対象は**実測でしか得られない唯一の資産**なので、表示用の
+  //   メタデータのために触るのは割に合わない。既存の校正には出所が無いのが事実でもある。
+  //   **不変条件：calMeta[mod] は cal[mod] があるときだけ意味を持つ。** 書くときも消すときも対で扱う。
   profiles: [
-    { id: 'p1', name: '100Ws', ws: 100, k: K_DEFAULT, hss: true, minPowerStops: 7, powerCeilingStops: 2, modifier: 'reflector', cal: {} },
-    { id: 'p2', name: '200Ws', ws: 200, k: K_DEFAULT, hss: true, minPowerStops: 7, powerCeilingStops: 2, modifier: 'reflector', cal: {} },
+    { id: 'p1', name: '100Ws', ws: 100, k: K_DEFAULT, hss: true, minPowerStops: 7, powerCeilingStops: 2, modifier: 'reflector', cal: {}, calMeta: {} },
+    { id: 'p2', name: '200Ws', ws: 200, k: K_DEFAULT, hss: true, minPowerStops: 7, powerCeilingStops: 2, modifier: 'reflector', cal: {}, calMeta: {} },
   ],
   settings: {
     hssBaseLoss: HSS_BASE_LOSS_DEFAULT, ambientOffsetDefault: -1,

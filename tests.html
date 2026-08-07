@@ -59,7 +59,7 @@
     import { solveND, ndLabel } from './js/filters.js';
     import {
       gnBase, applyModifier, applyIso, effectiveGN,
-      calibrate, hssLoss, overStops, resolvePower, flashDuration,
+      calibrate, calibrateFromLabels, hssLoss, overStops, resolvePower, flashDuration,
     } from './js/flash.js';
     import {
       shakeWarning, overBrightWarning, isoFloorWarning, freezeWarning, blowoutWarning,
@@ -67,7 +67,10 @@
     } from './js/advisor.js';
     import { SUBJECTS, POWER_STEPS, HELP, MEASURED_SCENE_KEY } from './js/scenes.js';
     import { parseExif } from './js/exif.js';
-    import { evFromExposure, solveAeOffset, lensChangeNote, measurementNotes } from './js/lightmeter.js';
+    import {
+      evFromExposure, solveAeOffset, lensChangeNote, measurementNotes,
+      calibrationNotes, exifSummary,
+    } from './js/lightmeter.js';
     import { compute, clampManual } from './js/compute.js';
     import { makeState, migrate, mergeDeep, clampPanelSize } from './js/state.js';
     // wheel.js から純粋関数だけを取る（makeWheel は DOM を作るのでここでは使わない）
@@ -1316,7 +1319,7 @@
         && un.phoneUncalibrated === true && cal.phoneUncalibrated === false;
       return { expected: '既定 false / 未校正 true / 校正済み false', actual: `${un.phoneUncalibrated} / ${cal.phoneUncalibrated}`, pass: ok };
     });
-    add('I3', '測定値のシーンでは白飛び判定が黙る（コントラストが分からないため）', () => {
+    add('I1b', '測定値のシーンでは白飛び判定が黙る（コントラストが分からないため）', () => {
       // 快晴（contrast 2.5）+ 逆光（+2.0）= 4.5段 でヘッドルーム3段を超えるので通常は警告が出る
       const base = {
         intent: 'daylightSync', camera: { isoMin: 200 }, lens: { fMin: F28, fMax: 22 },
@@ -1327,6 +1330,89 @@
       const has = (d) => d.warnings.some((w) => w.helpId === HELP.blowout);
       const ok = has(chip) === true && has(meas) === false;
       return { expected: 'チップ:警告あり / 測定:警告なし', actual: `${has(chip)} / ${has(meas)}`, pass: ok };
+    });
+
+    // ===== フェーズ2：カメラの EXIF で校正の入力を補完（photocal-spec §4）=========
+    // **カメラ側は公称ラベルなので厳密値へ変換する。** スマホ側（L9）とは逆。
+    // 変換の有無で k が 0.08段 変わるので、I3 がその境界を固定する。
+
+    add('I3', '校正: EXIF の F11・ISO100 / 3m / 1/1（200Ws）→ k = 2.400。**変換を外したら落ちる**', () => {
+      // 公称 F11 の実体は 2^(21/6) = 11.3137。GN = 11.3137 × 3 = 33.941
+      //   k = 33.941 / √200 = 2.400（きっかり。2^3.5·3/(10·2^0.5) = 24/10）
+      // 変換しないと 33.0 / √200 = 2.3335 になり、0.0665 の差＝ちょうど 0.08段
+      // **校正 UI が実際に呼ぶ関数（calibrateFromLabels）を通す。**
+      // exactFromLabels を直接呼ぶだけだと、UI 側で変換を書き忘れても気づけない。
+      const shot = { ws: 200, distance: 3, fAperture: 11, iso: 100, powerStops: 0 };
+      const r = calibrateFromLabels(shot);
+      const without = calibrate(shot).k;       // 素の calibrate＝公称ラベルのまま
+      const gapStops = 2 * Math.log2(r.k / without);
+      const ok = near(r.fExact, 11.3137085, 1e-6)
+        && near(r.k, 2.4, 1e-12)               // 変換あり
+        && !near(r.k, without, 0.01)           // 変換なしと判別できている
+        && near(without, 2.3335, 0.001)
+        && near(gapStops, 0.0816, 0.001);
+      return {
+        expected: 'k = 2.400（変換あり）／2.3335（なし）／差 0.082段',
+        actual: `${r.k.toFixed(4)} / ${without.toFixed(4)} / ${gapStops.toFixed(4)}段（F実体 ${r.fExact.toFixed(4)}）`,
+        pass: ok,
+      };
+    });
+    add('I4', '校正: ExposureTime が同調速度より速く発光ありのとき警告が返る', () => {
+      const fast = { flashFired: true, exposureTime: 1 / 500, fNumber: 11 };
+      const okSpeed = { flashFired: true, exposureTime: 1 / 250, fNumber: 11 };
+      const a = calibrationNotes(fast, { syncSpeed: 1 / 250, inputF: 11 });
+      const b = calibrationNotes(okSpeed, { syncSpeed: 1 / 250, inputF: 11 });
+      const ok = a.length === 1 && a[0].level === 'warn'
+        && /SS 1\/500 は同調速度 1\/250 より速い/.test(a[0].text) && /HSS/.test(a[0].text)
+        && b.length === 0;
+      return { expected: '1/500→warn 1件 / 1/250→0件', actual: `${a.map((n) => n.text).join('')} | ${b.length}件`, pass: ok };
+    });
+    add('I5', '校正: Flash の bit0 が0のとき「発光していません」が返る', () => {
+      // 実機のカメラは非発光で 16（bit0 = 0）を書く。**0 かどうかで見ないこと**
+      const off = parseExif(jpegExif(true, { flash: 16 }));
+      const on = parseExif(jpegExif(true, { flash: 0x19 }));   // bit0=1（発光・戻り光検出）
+      const a = calibrationNotes(off, { syncSpeed: 1 / 250, inputF: 11 });
+      const b = calibrationNotes(on, { syncSpeed: 1 / 250, inputF: 11 });
+      const ok = off.flashFired === false && on.flashFired === true
+        && a.some((n) => n.level === 'alert' && /発光していません/.test(n.text))
+        && !b.some((n) => /発光していません/.test(n.text));
+      return {
+        expected: 'Flash=16→非発光・alert / Flash=0x19→発光・alertなし',
+        actual: `16:${off.flashFired}「${a.map((n) => n.text).join('')}」/ 0x19:${on.flashFired}`,
+        pass: ok,
+      };
+    });
+    add('I6', '校正: 手入力の F値 と EXIF が食い違ったら両方を並べて出す', () => {
+      const exif = { flashFired: true, exposureTime: 1 / 250, fNumber: 11 };
+      const bad = calibrationNotes(exif, { syncSpeed: 1 / 250, inputF: 8 });
+      const same = calibrationNotes(exif, { syncSpeed: 1 / 250, inputF: 11 });
+      // ラベルは系列の表記をそのまま使う（F8 は '8.0'）。アプリの他の表示と揃える
+      const ok = bad.length === 1 && /EXIF は F11、入力は F8\.0 です/.test(bad[0].text) && same.length === 0;
+      return { expected: '「EXIF は F11、入力は F8.0 です。どちらを使いますか」', actual: bad.map((n) => n.text).join('') || '出ない', pass: ok };
+    });
+    add('I7', '校正履歴: calMeta は別キーで、cal を壊さず schemaVersion も上げない', () => {
+      const st = makeState();
+      const p = st.profiles[0];
+      // 既存データ（calMeta が無い）を読んでも落ちないこと＝移送が要らないことの確認
+      const legacy = makeState({ profiles: [{ ...p, cal: { reflector: 2.33 } }, st.profiles[1]] });
+      delete legacy.profiles[0].calMeta;
+      const d = compute(mergeDeep(legacy, { intent: 'daylightSync' }));
+      const ok = typeof p.cal === 'object' && typeof p.calMeta === 'object'
+        && makeState().schemaVersion === 2          // 上げていない
+        && legacy.profiles[0].cal.reflector === 2.33 // k は残る
+        && d.uncalibrated === false;                 // calMeta 無しでも「校正済み」と判定される
+      return {
+        expected: 'cal と calMeta は別キー / schemaVersion 2 のまま / calMeta 無しでも校正済み',
+        actual: `schemaVersion=${makeState().schemaVersion} / k=${legacy.profiles[0].cal.reflector} / uncalibrated=${d.uncalibrated}`,
+        pass: ok,
+      };
+    });
+    add('I8', '校正: exifSummary が機種・日時・撮影条件を1行にまとめる', () => {
+      const e = parseExif(jpegExif(true, { fNum: 1100, fDen: 100, expNum: 1, expDen: 250, iso: 100, flash: 0x19 }));
+      const s = exifSummary(e);
+      const ok = /Z6/.test(s.head) && /2026-08-06/.test(s.head)
+        && /F11/.test(s.body) && /1\/250/.test(s.body) && /ISO100/.test(s.body) && /発光あり/.test(s.body);
+      return { expected: 'Z6 / 2026-08-06 … F11 ・ 1/250 ・ ISO100 ・ … ・ 発光あり', actual: `${s.head} / ${s.body}`, pass: ok };
     });
 
     add('11c', 'compute: 100Ws→200Ws で到達距離がちょうど1段（√2倍）', () => {

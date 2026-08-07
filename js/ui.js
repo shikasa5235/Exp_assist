@@ -15,10 +15,12 @@ import {
   K_MIN, K_MAX, HSS_BASE_LOSS_MIN, HSS_BASE_LOSS_MAX, BLACK_MIST_STOPS_MAX,
   HIGHLIGHT_HEADROOM_MIN, HIGHLIGHT_HEADROOM_MAX, MEASURED_SCENE_KEY,
 } from './scenes.js';
-import { F, SS, ISO } from './stops.js';
-import { calibrate } from './flash.js';
+import { F, SS, ISO, snap } from './stops.js';
+import { calibrateFromLabels } from './flash.js';
 import { parseExif } from './exif.js';
-import { evFromExposure, solveAeOffset, measurementNotes } from './lightmeter.js';
+import {
+  evFromExposure, solveAeOffset, measurementNotes, calibrationNotes, exifSummary,
+} from './lightmeter.js';
 import { makeWheel } from './wheel.js';
 import { defaultState, clone, mergeDeep, migrate, clampPanelSize, PANEL_SIZES } from './state.js';
 import * as storage from './storage.js';
@@ -1082,7 +1084,8 @@ function profileCard(p, i) {
     <div class="set-row"><label>おまかせの上限<br><span class="caption">これより強い発光量を自動で選びません</span></label>
       ${powerSelectHtml('powerCeiling', p.powerCeilingStops ?? 0)}</div>
     <div class="toggle-field"><span class="field-label">HSS 対応</span>
-      <button type="button" class="toggle" data-pfield="hss" role="switch" aria-checked="${p.hss}" aria-label="HSS対応"><span class="toggle-knob"></span></button></div>`;
+      <button type="button" class="toggle" data-pfield="hss" role="switch" aria-checked="${p.hss}" aria-label="HSS対応"><span class="toggle-knob"></span></button></div>
+    <div class="cal-history" data-pfield="history" hidden></div>`;
   // 校正フォームは常時展開する。押すまで出ないボタンでは発見されない（アプリの精度を決める中核機能）。
   card.appendChild(calibrationForm(i));
   // プロファイル各項目の変更配線
@@ -1138,6 +1141,9 @@ function raiseCeiling(to) {
  * @param {number} i プロファイルの添字
  * @returns {HTMLElement}
  */
+/** 校正に使った写真の EXIF（プロファイル添字ごと）。**state に入れない**（適用前の候補）。 */
+const calPhotoExif = new Map();
+
 function calibrationForm(i) {
   const form = document.createElement('div');
   form.className = 'calib-form';
@@ -1145,15 +1151,67 @@ function calibrationForm(i) {
     <div class="calib-title">テスト撮影で校正</div>
     <p class="caption">標準リフレクター（または使うモディファイア）で1枚撮り、適正だった値を入れます。
     いま選択中のモディファイアの校正値として保存されます。</p>
-    <div class="set-row"><label>ストロボ→被写体の距離(m)</label><input class="input" data-c="distance" type="text" inputmode="decimal" value="3"></div>
-    <div class="set-row"><label>適正だったF値</label><input class="input" data-c="f" type="text" inputmode="decimal" value="11"></div>
-    <div class="set-row"><label>そのときのISO</label><input class="input" data-c="iso" type="text" inputmode="decimal" value="100"></div>
-    <div class="set-row"><label>そのときの発光量</label>${powerSelectHtml('power', 0, 'data-c')}</div>`;
+    <div class="set-row"><label for="cal-photo-${i}">カメラの写真から読む</label>
+      <span class="meter-row">
+        <label class="btn btn-ghost meter-pick" for="cal-photo-${i}">写真を選ぶ</label>
+        <input type="file" id="cal-photo-${i}" class="sr-only">
+      </span></div>
+    <p class="caption cal-readout" data-c="readout" hidden></p>
+    <p class="meter-notes caption" data-c="notes" hidden></p>
+    <div class="set-row"><label>ストロボ→被写体の距離(m)<br><span class="caption">写真には記録されないので手入力</span></label><input class="input" data-c="distance" type="text" inputmode="decimal" value="3"></div>
+    <div class="set-row"><div class="label-row"><label for="cal-f-${i}">適正だったF値</label><span class="badge badge-src" data-c="src-f" hidden>EXIF</span></div><input class="input" id="cal-f-${i}" data-c="f" type="text" inputmode="decimal" value="11"></div>
+    <div class="set-row"><div class="label-row"><label for="cal-iso-${i}">そのときのISO</label><span class="badge badge-src" data-c="src-iso" hidden>EXIF</span></div><input class="input" id="cal-iso-${i}" data-c="iso" type="text" inputmode="decimal" value="100"></div>
+    <div class="set-row"><label>そのときの発光量<br><span class="caption">写真には記録されないので手入力</span></label>${powerSelectHtml('power', 0, 'data-c')}</div>`;
   const run = document.createElement('button');
   run.type = 'button'; run.className = 'btn btn-primary btn-block'; run.textContent = 'この結果で校正する';
   run.addEventListener('click', () => runCalibration(form, i));
   form.appendChild(run);
+  wireCalibrationPhoto(form, i);
   return form;
+}
+
+/** 校正欄の「写真を選ぶ」。F値と ISO を自動入力し、整合検証の結果を出す。 */
+function wireCalibrationPhoto(form, i) {
+  const q = (c) => form.querySelector(`[data-c="${c}"]`);
+  const readout = q('readout'), notes = q('notes');
+  // 手で上書きしたら出所バッジを外す。**EXIF 由来でない値に EXIF と表示しない**
+  ['f', 'iso'].forEach((c) => q(c).addEventListener('input', () => { q(`src-${c}`).hidden = true; }));
+
+  form.querySelector(`#cal-photo-${i}`).addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    e.target.value = '';
+    readout.hidden = false; readout.textContent = '読み込み中…'; readout.classList.remove('is-error');
+    readImageBuffer(file).then((buf) => {
+      const exif = parseExif(buf);
+      if (!exif || exif.format !== 'jpeg' || !(exif.fNumber > 0) || !(exif.iso > 0)) {
+        calPhotoExif.delete(i);
+        readout.classList.add('is-error');
+        readout.textContent = exif && exif.format === 'heic'
+          ? 'この形式は読み取れません。カメラの JPEG を選んでください'
+          : 'この写真から F値・ISO を読み取れませんでした（RAW は読めません。カメラの JPEG を選んでください）';
+        notes.hidden = true;
+        return;
+      }
+      calPhotoExif.set(i, exif);
+      // **入力欄には公称ラベルを入れる**（人が読み合わせできる形）。
+      // 厳密値への変換は runCalibration が calibrate に渡す直前に1度だけ行う
+      q('f').value = snap(F, exif.fNumber).label;
+      q('iso').value = snap(ISO, exif.iso).label;
+      q('src-f').hidden = false; q('src-iso').hidden = false;
+      const s = exifSummary(exif);
+      readout.classList.remove('is-error');
+      readout.textContent = `${s.head}\n${s.body}`;
+      // 整合検証。入力欄は今 EXIF で埋めた直後なので inputF の食い違いはここでは出ない
+      const list = calibrationNotes(exif, { syncSpeed: state.camera.syncSpeed, inputF: null });
+      notes.textContent = list.map((n) => n.text).join('／');
+      notes.hidden = !notes.textContent;
+    }).catch((err) => {
+      calPhotoExif.delete(i);
+      readout.classList.add('is-error');
+      readout.textContent = `読み取れませんでした（${err && err.message ? err.message : err}）`;
+    });
+  });
 }
 
 /**
@@ -1177,7 +1235,18 @@ function runCalibration(form, i) {
     if (![distance, fAperture, iso, powerStops].every(Number.isFinite)) {
       throw new Error('数値として読めない入力があります');
     }
-    const { k } = calibrate({
+    const exif = calPhotoExif.get(i);
+    // 発光していない写真では校正できない。ここで止めないと k が丸ごと狂う
+    const blocking = exif
+      ? calibrationNotes(exif, { syncSpeed: state.camera.syncSpeed, inputF: fAperture })
+        .filter((n) => n.level === 'alert')
+      : [];
+    if (blocking.length) throw new Error(blocking[0].text);
+
+    // **`calibrate` ではなく `calibrateFromLabels` を呼ぶ。**
+    // F値・ISO は EXIF から入れても手で入れても公称ラベル（F11 の実体は 11.3137）。
+    // 変換は flash.js に閉じ込めてあるので、ここに書き足さないこと（回帰テストは I3）。
+    const { k } = calibrateFromLabels({
       ws: state.profiles[i].ws,
       distance: clamp(distance, 0.3, 50),
       fAperture: clamp(fAperture, 1, 32),
@@ -1187,8 +1256,12 @@ function runCalibration(form, i) {
     if (!Number.isFinite(k)) throw new Error('k を計算できません');
     const kClamped = clamp(k, K_MIN, K_MAX);
 
-    // 実測 k はモディファイアごとに保存する（切り替えても正確なまま／未校正の組み合わせはバッジが出る）
-    updateProfile(i, { cal: { ...(state.profiles[i].cal || {}), [mod]: kClamped } });
+    // 実測 k はモディファイアごとに保存する（切り替えても正確なまま／未校正の組み合わせはバッジが出る）。
+    // 出所は別キー calMeta に。**cal と対で書く**（片方だけ残すと履歴が嘘になる）
+    const meta = { ...(state.profiles[i].calMeta || {}) };
+    if (exif) meta[mod] = { model: exif.model || exif.make || null, date: exif.dateTimeOriginal || null };
+    else delete meta[mod];   // 手入力での再校正は出所を持たない。古い出所を残さない
+    updateProfile(i, { cal: { ...(state.profiles[i].cal || {}), [mod]: kClamped }, calMeta: meta });
 
     // 書き込めたことを state から読み返して確認する。書けていないのに成功と表示しない
     const saved = state.profiles[i].cal ? state.profiles[i].cal[mod] : undefined;
@@ -1244,9 +1317,15 @@ function phoneCalibrationForm() {
         <input type="file" id="cal-phone-file" class="sr-only">
         <span class="meter-result" id="cal-phone-result"></span>
       </span></div>
-    <div class="set-row"><label>② カメラの適正F値</label><input class="input" data-p="f" type="text" inputmode="decimal" value="8"></div>
-    <div class="set-row"><label>そのときのSS<br><span class="caption">1/250 でも 250 でも可。2秒なら 2s</span></label><input class="input" data-p="ss" type="text" inputmode="decimal" value="250"></div>
-    <div class="set-row"><label>そのときのISO</label><input class="input" data-p="iso" type="text" inputmode="decimal" value="100"></div>
+    <div class="set-row"><label for="cal-cam-file">② カメラの値<br><span class="caption">写真から入れるか、手で入れる</span></label>
+      <span class="meter-row">
+        <label class="btn btn-ghost meter-pick" for="cal-cam-file">写真を選ぶ</label>
+        <input type="file" id="cal-cam-file" class="sr-only">
+        <span class="meter-result" id="cal-cam-result"></span>
+      </span></div>
+    <div class="set-row"><div class="label-row"><label>カメラの適正F値</label><span class="badge badge-src" data-p="src-f" hidden>EXIF</span></div><input class="input" data-p="f" type="text" inputmode="decimal" value="8"></div>
+    <div class="set-row"><div class="label-row"><label>そのときのSS<br><span class="caption">1/250 でも 250 でも可。2秒なら 2s</span></label><span class="badge badge-src" data-p="src-ss" hidden>EXIF</span></div><input class="input" data-p="ss" type="text" inputmode="decimal" value="250"></div>
+    <div class="set-row"><div class="label-row"><label>そのときのISO</label><span class="badge badge-src" data-p="src-iso" hidden>EXIF</span></div><input class="input" data-p="iso" type="text" inputmode="decimal" value="100"></div>
     <p class="caption meter-privacy">写真は端末内で読み取るだけで、どこにも送信されません。位置情報は読み取りません。</p>`;
   const run = document.createElement('button');
   run.type = 'button'; run.className = 'btn btn-primary btn-block'; run.textContent = 'この結果で校正する';
@@ -1260,6 +1339,35 @@ function phoneCalibrationForm() {
     toast('スマホ露出計の校正を取り消しました');
   });
   form.appendChild(clear);
+
+  // ②のカメラ側も写真から埋められる（フェーズ2）。**入力欄には公称ラベルを入れる。**
+  // 厳密値への変換は solveAeOffset のカメラ側で1度だけ行う（スマホ側は変換しない）
+  const camOut = form.querySelector('#cal-cam-result');
+  const qp = (p) => form.querySelector(`[data-p="${p}"]`);
+  ['f', 'ss', 'iso'].forEach((p) => qp(p).addEventListener('input', () => { qp(`src-${p}`).hidden = true; }));
+  form.querySelector('#cal-cam-file').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    e.target.value = '';
+    camOut.textContent = '読み込み中…'; camOut.classList.remove('is-error');
+    readImageBuffer(f).then((buf) => {
+      const exif = parseExif(buf);
+      if (!exif || !(exif.fNumber > 0) || !(exif.exposureTime > 0) || !(exif.iso > 0)) {
+        camOut.textContent = 'この写真から F値・SS・ISO を読み取れませんでした';
+        camOut.classList.add('is-error');
+        return;
+      }
+      qp('f').value = snap(F, exif.fNumber).label;
+      qp('ss').value = snap(SS, exif.exposureTime).label;
+      qp('iso').value = snap(ISO, exif.iso).label;
+      ['f', 'ss', 'iso'].forEach((p) => { qp(`src-${p}`).hidden = false; });
+      const s = exifSummary(exif);
+      camOut.textContent = `${s.head} ／ ${s.body}`;
+    }).catch((err) => {
+      camOut.textContent = `読み取れませんでした（${err && err.message ? err.message : err}）`;
+      camOut.classList.add('is-error');
+    });
+  });
 
   const out = form.querySelector('#cal-phone-result');
   form.querySelector('#cal-phone-file').addEventListener('change', (e) => {
@@ -1382,11 +1490,33 @@ function renderSettings() {
     setInputVal(card, 'minPower', p.minPowerStops);
     setInputVal(card, 'powerCeiling', p.powerCeilingStops ?? 0);
     card.querySelector('[data-pfield="hss"]').setAttribute('aria-checked', String(p.hss));
+    renderCalHistory(card.querySelector('[data-pfield="history"]'), p);
   });
   const owned = el.settingsRoot.querySelector('#owned-nd-chips');
   if (owned) owned.querySelectorAll('[data-key]').forEach((c) => {
     c.setAttribute('aria-checked', String(state.settings.ownedND.includes(Number(c.dataset.key))));
   });
+}
+
+/**
+ * 校正履歴。**`cal` が正典で、`calMeta` はそこに出所を添えるだけ。**
+ * `cal` に無いモディファイアは出さない（`calMeta` だけ残っていても未校正）。
+ * @param {HTMLElement|null} box @param {object} p プロファイル
+ */
+function renderCalHistory(box, p) {
+  if (!box) return;
+  const cal = p.cal || {}, meta = p.calMeta || {};
+  const rows = Object.keys(cal).filter((m) => Number.isFinite(cal[m])).map((m) => {
+    const label = (MODIFIERS.find((x) => x.key === m) || {}).label || m;
+    const info = meta[m] || {};
+    // 出所が無いのは手入力での校正か、この機能より前の校正。空欄にして嘘を書かない
+    const date = info.date ? info.date.replace(/^(\d{4}):(\d{2}):(\d{2}).*$/, '$1-$2-$3') : '';
+    return `<tr><th>${label}</th><td class="tabular">k = ${cal[m].toFixed(2)}</td>`
+      + `<td class="caption">${[date, info.model || ''].filter(Boolean).join('　') || '出所なし'}</td></tr>`;
+  });
+  box.hidden = rows.length === 0;
+  box.innerHTML = rows.length
+    ? `<div class="calib-title">校正履歴</div><table><tbody>${rows.join('')}</tbody></table>` : '';
 }
 
 function setInputVal(card, field, v) {

@@ -7,6 +7,7 @@
 // - Ws→GN は一意に決まらない推定値。校正機能とセットで、未校正は「推定値」バッジを出す。
 
 import { POWER_STEPS, ISO_REF } from './scenes.js';
+import { F, ISO, snap } from './stops.js';
 
 /**
  * Ws から基準 GN（ISO100・フル発光・標準リフレクター）を推定する。仕様 §5.2。
@@ -94,6 +95,31 @@ export function calibrate({ ws, distance, fAperture, iso, powerStops = 0 }) {
   const gnMeasured = fAperture * distance;
   const gnAtIso100Full = gnMeasured / Math.sqrt(iso / ISO_REF) * 2 ** (powerStops / 2);
   return { gnMeasured, gnAtIso100Full, k: gnAtIso100Full / Math.sqrt(ws) };
+}
+
+/**
+ * **公称ラベルで読み取った値から校正する。校正 UI はこちらを呼ぶこと。**
+ *
+ * カメラの EXIF も、人が背面液晶から読んで打ち込む値も、どちらも 1/3段グリッドの
+ * **公称ラベル**（`F11` の実体は 11.3137、`ISO80` は 79.37）。`calibrate()` に
+ * ラベルのまま渡すと k が 0.08段 ずれる（200Ws・3m・ISO100・1/1 で 2.400 → 2.3335）。
+ *
+ * **スマホの測定側（`lightmeter.evFromExposure`）は逆に変換しない。**
+ * あちらは AE が連続値で制御した実測値（`1/4405`）で、グリッド上に存在しないため。
+ * 出所の判別はメタデータで行わない。**呼び出し側が自分の用途を知っている。**
+ *
+ * 変換をここに閉じ込めてあるので、UI 側で書き忘れる余地が無い。回帰テストは **I3**。
+ *
+ * @param {{ws:number,distance:number,fAperture:number,iso:number,powerStops?:number}} input
+ *   fAperture / iso は**公称ラベル**（11 / 100 のように読み取った値）
+ * @returns {{gnMeasured:number,gnAtIso100Full:number,k:number,
+ *            fExact:number,isoExact:number}}
+ */
+export function calibrateFromLabels(input) {
+  const g = (series, v) => (Number.isFinite(v) && v > 0 ? snap(series, v).real : v);
+  const fExact = g(F, input.fAperture);
+  const isoExact = g(ISO, input.iso);
+  return { ...calibrate({ ...input, fAperture: fExact, iso: isoExact }), fExact, isoExact };
 }
 
 /**

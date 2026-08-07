@@ -66,13 +66,30 @@ export function evFromExposure(exif, aeOffsetStops = 0) {
 }
 
 /**
- * 公称ラベルで入力されたカメラ側の露出を厳密値へ直す。
- * `compute.exactGear()` と同じ考え方（`F11` の実体は 11.31、`1/250` は 1/256）。
- * **スマホ側には使わない**（実測値なので寄せると誤差が増える）。
- * @param {{fNumber:number, exposureTime:number, iso:number}} nominal
- * @returns {{fNumber:number, exposureTime:number, iso:number}}
+ * 公称ラベルで記録／入力された**カメラ側**の露出を厳密値へ直す。
+ * `compute.exactGear()` と同じ考え方（`F11` の実体は 11.3137、`1/250` は 1/256）。
+ *
+ * ─────────────────────────────────────────────────────────────────
+ * **フェーズ1（変換しない）と矛盾しているように見えるが、対象が違う。**
+ *
+ * | 出所 | 値の性格 | 変換 |
+ * | --- | --- | --- |
+ * | スマホ | AE が**連続値**で制御し実測値を記録（`1/4405`・`F1.77999997`） | **しない** |
+ * | カメラ | ユーザーが**1/3段グリッドから選ぶ**。記録されるのは公称ラベル（`F11`・`1/250`） | **する** |
+ *
+ * 校正の `k` は F値と距離から求めるので、`F11` を 11.0 のまま使うと k が 0.08段 ずれる
+ * （200Ws・3m・ISO100・1/1 で **2.400 → 2.3335**）。回帰テストは `tests.html` の **I3**。
+ *
+ * **どちらの出所かはメタデータから判別しない。** `Make` が Apple なら…という判別は脆い
+ * （機種名は増える／PC 経由でメーカーが書き換わる／エミュレータ）。
+ * **呼び出し側は自分がどちらの UI かを知っている**ので、`parseExif` は生の値を返し、
+ * 変換するかどうかは呼び出し側（校正UI = する／測定UI = しない）が決める。
+ * ─────────────────────────────────────────────────────────────────
+ *
+ * @param {{fNumber:number|null, exposureTime:number|null, iso:number|null}} nominal
+ * @returns {{fNumber:number|null, exposureTime:number|null, iso:number|null}}
  */
-function exactFromLabels(nominal) {
+export function exactFromLabels(nominal) {
   const g = (series, v) => (Number.isFinite(v) && v > 0 ? snap(series, v).real : v);
   return {
     fNumber: g(F, nominal.fNumber),
@@ -115,6 +132,62 @@ export function solveAeOffset(phoneExposure, cameraExposure) {
     return { offsetStops: null, reason: `カメラ側の${camera.reason}`, evPhone: phone.ev, evCamera: null };
   }
   return { offsetStops: camera.ev - phone.ev, reason: null, evPhone: phone.ev, evCamera: camera.ev };
+}
+
+/**
+ * ストロボ校正に使う写真の整合検証（photocal-spec §4.3）。
+ *
+ * **`lightmeter.js` に置く理由：** 「EXIF の値をどう解釈するか」を持つ唯一の純粋モジュール。
+ * `advisor.js` は露出計算の判定で EXIF を知らず、`compute.js` は state からしか値を受けない。
+ * `measurementNotes` と同じ形（判定＋文言）なので隣に置く。
+ *
+ * @param {object} exif `parseExif()` の戻り（**生の値。変換前でよい**）
+ * @param {{syncSpeed:number, inputF:number|null}} ctx
+ *   syncSpeed = カメラの同調速度（秒）、inputF = 校正欄に入っている F値（公称ラベル）
+ * @returns {Array<{level:'alert'|'warn', text:string}>} 空なら問題なし
+ */
+export function calibrationNotes(exif, ctx) {
+  const notes = [];
+  if (!exif) return notes;
+  const { syncSpeed, inputF } = ctx || {};
+  // ① 非発光。校正はストロボ光の量を測るものなので、光っていない写真は使えない
+  if (exif.flashFired === false) {
+    notes.push({ level: 'alert', text: 'この写真ではストロボが発光していません。校正には使えません' });
+  }
+  // ② 同調速度超過。通常発光なら幕に切られているので露出が信用できない
+  if (exif.flashFired === true && exif.exposureTime > 0 && syncSpeed > 0
+      && exif.exposureTime < syncSpeed) {
+    const ss = snap(SS, exif.exposureTime).label, sync = snap(SS, syncSpeed).label;
+    notes.push({ level: 'warn', text: `SS ${ss} は同調速度 ${sync} より速いため、通常発光では同期しません。HSS で撮影しましたか` });
+  }
+  // ③ 手入力と EXIF の食い違い。**転記ミスをその場で気づけるのでこれが実用上いちばん効く。**
+  //   どちらも公称ラベルなので、1/3段グリッドの同じ位置に落ちるかで比べる
+  if (exif.fNumber > 0 && inputF > 0) {
+    const a = snap(F, exif.fNumber), b = snap(F, inputF);
+    if (a.index !== b.index) {
+      notes.push({ level: 'warn', text: `EXIF は F${a.label}、入力は F${b.label} です。どちらを使いますか` });
+    }
+  }
+  return notes;
+}
+
+/**
+ * 校正の出所を1行にまとめる（設定タブの読み取り結果表示）。
+ * @param {object} exif @returns {{head:string, body:string}}
+ */
+export function exifSummary(exif) {
+  if (!exif) return { head: '', body: '' };
+  const date = exif.dateTimeOriginal
+    ? exif.dateTimeOriginal.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3').slice(0, 16) : '';
+  const head = [exif.model || exif.make || '機種不明', date].filter(Boolean).join(' / ');
+  const body = [
+    exif.fNumber > 0 ? `F${snap(F, exif.fNumber).label}` : null,
+    exif.exposureTime > 0 ? snap(SS, exif.exposureTime).label : null,
+    exif.iso > 0 ? `ISO${snap(ISO, exif.iso).label}` : null,
+    exif.focalLength > 0 ? `${Math.round(exif.focalLength)}mm` : null,
+    exif.flashFired === null ? null : (exif.flashFired ? '発光あり' : '発光なし'),
+  ].filter(Boolean).join(' ・ ');
+  return { head, body };
 }
 
 /**
