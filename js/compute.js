@@ -587,7 +587,7 @@ function manualShort(axis, stops, kind, nd) {
   }
   const axisRem = others.map((a, i) => (i === 0 ? 'ロックを外して ' : '') + dec[a]);
   // 「ND を足す」で止めると、何段のどれを足すかはユーザーが計算することになる。
-  // solveND は所有 ND から答えを出せるので、持っている答えを出す（かんたんタブと同じ扱い）。
+  // solveND は所有 ND から答えを出せるので、持っている答えを出す（簡単タブと同じ扱い）。
   const adv = ndAdvice(nd.owned, stops, nd.attached);
   const ndRem = adv.text ? `${adv.text}${adv.note}` : 'ND を足す';
   return { level: 'alert', icon: 'alert', helpId: HELP.calcClamp, message: `明るすぎます（${N}段超過）。${[ndRem, ...axisRem].join('／')}` };

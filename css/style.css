@@ -139,12 +139,20 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 }
 .tabs { display: flex; gap: 4px; }
 .tab {
-  display: flex; align-items: center; gap: 6px;
-  min-height: var(--tap-min); padding: 0 10px; border-radius: var(--r-chip);
+  display: flex; align-items: center; justify-content: center;
+  min-height: var(--tap-min); padding: 0 8px; border-radius: var(--r-chip);
   color: var(--ink-2); font-size: 13px; font-weight: 600;
   transition: background var(--dur-slide) var(--ease);
 }
-.tab .icon { width: 20px; height: 20px; }
+/* **3タブとも2文字を縦に積む。** 横並びだと 320px でタブ列が入りきらない
+   （ヘッダー右に EV・テーマ・使い方が並ぶため、タブに使える幅は約 118px）。
+   高さは 13px × 2文字 ＝ 26px で、`min-height: 44px` のタップ領域にも
+   ヘッダー 52px にも収まる。**ヘッダーの高さは変えない**（結果パネルと 100dvh の配分の前提）。
+   読み上げは縦書きでも通常のテキストとして読まれる（画像化していない）。 */
+.tab span {
+  writing-mode: vertical-rl; text-orientation: upright;
+  line-height: 1; letter-spacing: .02em;
+}
 .tab[aria-selected="true"] { color: var(--ink); background: var(--sel); }
 .tab:active { background: var(--press); }
 /* 44px のアイコンボタンが並ぶので gap は --gap-tap（8px）を使う。6px では §7 の
@@ -259,10 +267,11 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .badge-est { color: var(--warn); border: 1px solid var(--warn); }
 /* 押せるバッジ（校正のしかたへ飛ぶ）。見た目は小さいまま当たり判定だけ 44px にする。
 
-   **`.warn-help` の「min-height + 負マージン」をここに流用しないこと。** あちらは枠線が
-   無いので 44px の箱が見えないが、`.badge-est` は枠線を持つので 44px の縦長ピルとして
-   描かれ、負マージンで上下へはみ出した分が隣の要素（プロファイルの select）に重なる。
-   実機で発生した。当たり判定は擬似要素で広げ、**箱そのものは文字の高さに保つ。** */
+   **「min-height: 44px + 負マージン」を使わないこと。** `.badge-est` は枠線を持つので
+   箱が 44px になると縦長のピルとして描かれ、負マージンで上下へはみ出した分が
+   隣の要素（プロファイルの select）に重なる。実機で発生した。
+   当たり判定は擬似要素で広げ、**箱そのものは文字の高さに保つ。**
+   `.warn-help` も同じ手（あちらは行高が膨らむのを避けるため）。 */
 .badge-link {
   position: relative;
   background: transparent; font: inherit; font-size: 11px; font-weight: 600;
@@ -463,9 +472,22 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .path-compare .adv { color: var(--ok); }
 .path-compare .caption { font-size: 12px; color: var(--warn); font-family: var(--font-text); }
 
-.warnings { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-/* flex-wrap は警告内の解決ボタン（.warn-action）を独立した行に落とすため */
-.warn-item { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.45; }
+/* gap は 8px（`--gap-tap` と同値）。**6px から広げてある。**
+   `?` の当たり判定が上下へ 3px ずつ出るので、6px だと隣との離間が 1px しか残らない。
+   8px にすると 3px（= 19px の行高 ＋ gap − 24px の判定高）。増分は警告4件で +6px。 */
+.warnings { margin-top: 8px; display: flex; flex-direction: column; gap: var(--gap-tap); }
+/* 警告1件を **1行** に収める3カラム（アイコン／本文／?）。
+   flex + flex-wrap だった頃は、本文が縮まないため ? が2行目へ落ち、解決ボタンで3行目になり、
+   4件出ると 12行 になって結果パネル（240px）に収まらなかった。
+
+   `1fr` の本文列だけが伸縮し、両端は固定幅。**3列目は ? が無くても幅を確保する**
+   （`auto` だと ? の有無で本文の幅が変わり、警告ごとに行の形が変わる）。
+   `align-items` は center ではなく **start**。本文が2行以上のときアイコンと ? が
+   縦中央に浮くと、どの行に対する印なのか視線が合わない。 */
+.warn-item {
+  display: grid; grid-template-columns: auto 1fr var(--icon-xs);
+  align-items: start; gap: 8px; font-size: 13px; line-height: 1.45;
+}
 .warn-item .icon { width: var(--icon-xs); height: var(--icon-xs); margin-top: 1px; flex: none; }
 .warn-item.info  { color: var(--ink-2); } .warn-item.info .icon  { color: var(--ink-2); }
 .warn-item.warn  { color: var(--warn); }  .warn-item.warn .icon  { color: var(--warn); }
@@ -605,17 +627,36 @@ button { font: inherit; color: inherit; background: none; border: none; cursor: 
 .manual-body td.num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
 /* 警告の ? ボタン（該当セクションへ飛ぶ） */
 /* 見た目は小さくても当たり判定は 44px 以上。行高を膨らませないため縦は負マージンで吸収 */
+/* **見た目はアイコン1つぶん、当たり判定だけ擬似要素で広げる**（.badge-link と同じ手）。
+   min-height: 44px + 負マージンにすると、隣の警告と重なるうえ grid の行高が膨らむ。
+
+   **縦は 24px を直書きする。`calc(100% + …)` にしないこと。**
+   絶対配置要素の % 高さは直近の位置指定祖先（= `.warn-help` 自身、18px 固定）に対して
+   解決されるので、`100%` は**行の高さではない。** 行が2行でも3行でも判定は広がらない。
+   以前 `calc(100% + 6px)` と書いて「行の高さ ＋ gap の半分」と説明していたが誤りだった。
+
+   縦 44px にしない理由：警告が1行のときの行送りは 19 + gap しかなく、44px の判定を積むと
+   隣同士が重なって「どちらの ? を押したか」が DOM 順で決まる。行を 44px に伸ばすと
+   4件で結果パネルに収まらない（それがこのグリッド化の目的）。
+
+   **横 44px × 縦 24px、隣との離間 3px。** WCAG 2.2 の最小 24×24 は満たすが
+   Apple の 44pt は縦だけ満たさない。UI仕様 §7 の例外表に記録した。
+   22px に縮めると WCAG の最小値を割るので、gap のほうを広げてある。 */
 .warn-help {
-  flex: none; display: flex; align-items: center; justify-content: center;
-  width: var(--tap-min); height: var(--tap-min); margin: -10px 0 -10px auto;
-  border-radius: var(--r-chip); color: var(--ink-2);
+  position: relative; display: flex; align-items: center; justify-content: center;
+  width: var(--icon-xs); height: var(--icon-xs); margin-top: 1px;
+  border-radius: 50%; color: var(--ink-2);
+}
+.warn-help::after {
+  content: ""; position: absolute; top: 50%; left: 50%;
+  width: var(--tap-min); height: 24px; transform: translate(-50%, -50%);
 }
 .warn-help:active { background: var(--press); }
 .warn-help .icon { width: var(--icon-xs); height: var(--icon-xs); }
 /* 警告内の解決ボタン。設定タブへ移動せずその場で直せるようにする（袋小路を作らないため） */
 /* 独立した行に落として全幅。指1本・片手で押せる高さを確保する */
 .warn-action {
-  flex: 0 0 100%; min-height: var(--tap-min); margin-top: 2px;
+  grid-column: 1 / -1; min-height: var(--tap-min); margin-top: 2px;
   display: flex; align-items: center; justify-content: center;
   border: 1px solid currentColor; border-radius: var(--r-chip);
   background: transparent; color: inherit; font: inherit; font-weight: 600;

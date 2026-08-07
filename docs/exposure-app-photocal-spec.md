@@ -156,7 +156,7 @@ phone.aeCalibrated  : boolean  // 未校正なら「推定値」バッジ
 
 ### 3.4 UI
 
-かんたんタブのシーン選択の下に配置する。
+簡単タブのシーン選択の下に配置する。
 
 ```
 シーン
@@ -675,7 +675,7 @@ export function measureRegion(img, region) { … }
 - `js/exif.js`（JPEG のみ。HEIC は検出して案内）
 - `js/lightmeter.js`
 - テスト E1〜E9・L1〜L8・I1・I2
-- かんたんタブの「写真から測る」
+- 簡単タブの「写真から測る」
 - AE オフセットの校正 UI（カメラの測光値は手入力）
 - 未校正バッジ
 

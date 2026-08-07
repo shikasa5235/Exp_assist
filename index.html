@@ -19,6 +19,10 @@
   <!-- ===== SVG シンボル集（外部アイコン禁止のため自前定義）===== -->
   <svg style="display:none" aria-hidden="true" focusable="false">
     <defs>
+      <!-- i-tab-easy / i-tab-calc は**現在どこからも参照していない**（意図的な保持）。
+           タブを縦書き2文字にしたときアイコンを外したため（320px で幅が足りない）。
+           ヘッダーの構成が変わってアイコンを戻す判断になったとき描き直さずに済むよう残す。
+           i-tab-settings はテーマ切り替えボタンが使っているので現役。 -->
       <symbol id="i-tab-easy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <line x1="4" y1="7" x2="20" y2="7"/><circle cx="9" cy="7" r="2"/>
         <line x1="4" y1="12" x2="20" y2="12"/><circle cx="15" cy="12" r="2"/>
@@ -95,14 +99,19 @@
   <!-- ===== ヘッダー（固定）===== -->
   <header class="app-header">
     <div class="tabs" role="tablist" aria-label="画面切り替え">
+      <!-- 3タブとも2文字を縦に積む（CSS の writing-mode）。**アイコンは外した。**
+           ヘッダー右に EV・テーマ・使い方の3つが並ぶため、320px でタブ列に使える幅は
+           約 118px しかない。アイコン(20)＋隙間(6)＋文字(13)＋左右padding では1タブ 60px で
+           3つ入らない。文字だけなら 1タブ 30px で収まる。
+           `data-tab` の値（easy/calc/settings）は state のキーなので**変えないこと**。 -->
       <button class="tab" role="tab" id="tab-btn-easy" aria-controls="tab-easy" aria-selected="true" data-tab="easy">
-        <svg class="icon" aria-hidden="true"><use href="#i-tab-easy"></use></svg><span>かんたん</span>
+        <span>簡単</span>
       </button>
       <button class="tab" role="tab" id="tab-btn-calc" aria-controls="tab-calc" aria-selected="false" tabindex="-1" data-tab="calc">
-        <svg class="icon" aria-hidden="true"><use href="#i-tab-calc"></use></svg><span>計算</span>
+        <span>計算</span>
       </button>
       <button class="tab" role="tab" id="tab-btn-settings" aria-controls="tab-settings" aria-selected="false" tabindex="-1" data-tab="settings">
-        <svg class="icon" aria-hidden="true"><use href="#i-tab-settings"></use></svg><span>設定</span>
+        <span>設定</span>
       </button>
     </div>
     <div class="header-right">
@@ -118,7 +127,7 @@
 
   <!-- ===== スクロール領域（タブごとのパネル）===== -->
   <main class="scroll-body" id="scroll-body">
-    <!-- タブ1 かんたん -->
+    <!-- タブ1 簡単 -->
     <section class="panel-tab" id="tab-easy" role="tabpanel" aria-labelledby="tab-btn-easy">
       <div class="field">
         <div class="field-label" id="lbl-scene">シーン</div>
@@ -342,7 +351,7 @@
         <p>電波がなくても動きます。すべての計算は端末の中だけで行われ、通信は一切しません。</p>
         <h4>3つの画面</h4>
         <table><tbody>
-          <tr><th>かんたん</th><td>シーンと撮りたい雰囲気を選んで、設定を出してもらう。通常はこれだけで足ります</td></tr>
+          <tr><th>簡単</th><td>シーンと撮りたい雰囲気を選んで、設定を出してもらう。通常はこれだけで足ります</td></tr>
           <tr><th>計算</th><td>F値・SS・ISO のうち2つを自分で決めて、残り1つを出す。等価露出の一覧も見られます</td></tr>
           <tr><th>設定</th><td>手持ちの機材を登録する。ストロボの校正もここ</td></tr>
         </tbody></table>
@@ -449,7 +458,7 @@
       </section>
 
       <section id="help-intent">
-        <h3>4 撮りたいものから決める（かんたんタブ）</h3>
+        <h3>4 撮りたいものから決める（簡単タブ）</h3>
         <p>意図を選ぶと、アプリが「何を優先して何を犠牲にするか」を決めて計算します。</p>
         <table><tbody>
           <tr><th>背景をぼかす</th><td>F値を開放に固定。明るい場所ではSSが速くなりすぎる／暗所ではISOが上がる</td></tr>
@@ -787,7 +796,7 @@
         <p><strong>ガラスを重ねるか、拡張ISOの画質低下を取るかのトレードオフです。</strong>
         拡張ISOは階調やノイズで不利になる場合があります。<strong>アプリは両方を出すだけで、選びません。</strong></p>
         <p>トグルを入れている間は「拡張ISOを使えば…」の案内は出ません（すでに使っているため）。
-        かんたんタブと計算タブの両方に同じトグルがあり、どちらから変えても連動します。</p>
+        簡単タブと計算タブの両方に同じトグルがあり、どちらから変えても連動します。</p>
         <h4>NDはストロボにも効く</h4>
         <p>5 のとおりです。ND4（2段）を付けたら、ストロボの発光量も2段上げる必要があります。
         アプリは自動で計算に入れているので、表示された発光量に従ってください。</p>
@@ -878,7 +887,7 @@
         <h4>2つ決めて3つ目を出す</h4>
         <p>F値・SS・ISO のうち<strong>2つの鍵アイコンを閉じる</strong>と、残り1つが自動で計算されます。
         鍵を開けて別の組み合わせに変えれば、そちらが計算されます。</p>
-        <p>シーンのEVはかんたんタブから引き継がれます。直接入力もできます。</p>
+        <p>シーンのEVは簡単タブから引き継がれます。直接入力もできます。</p>
         <h4>グレーになっている目盛り</h4>
         <p>ダイアルの端のほうが<strong>グレー</strong>になっていることがあります。ここは<strong>設定した機材では
         使えない範囲</strong>です。区切り線から先へは動きません。F値なら開放と最小絞り、

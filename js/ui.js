@@ -6,7 +6,7 @@
 // 規則：DOM を状態の保管場所にしない（element.value を判断に使わない。必ず state を見る）。
 //       再描画経路は setState の一本だけ。他に作らない。
 //
-// 8c-1 の範囲：配線骨格＋タブ1（かんたん）。タブ2/3・校正は 8c-2。
+// 8c-1 の範囲：配線骨格＋タブ1（簡単）。タブ2/3・校正は 8c-2。
 
 import { compute, clampManual } from './compute.js';
 import { formatStops } from './advisor.js';
@@ -287,7 +287,7 @@ function wireEvents() {
 
   wirePanelHandle();
 
-  // 拡張ISO トグル（かんたん・計算の両方。同じ state を見るので双方向に連動する）
+  // 拡張ISO トグル（簡単・計算の両方。同じ state を見るので双方向に連動する）
   document.querySelectorAll('.exp-iso-toggle').forEach((btn) => {
     btn.addEventListener('click', () => setState({ camera: { allowExpandedIso: !state.camera.allowExpandedIso } }));
   });
@@ -595,7 +595,7 @@ function renderTab1() {
   el.backlitToggle.setAttribute('aria-checked', String(state.flash.backlit));
   el.tripodToggle.setAttribute('aria-checked', String(state.flash.tripod));
   el.curtainToggle.setAttribute('aria-checked', String(state.flash.curtain));
-  // 拡張ISO（かんたん・計算の両方に同じ state を反映）
+  // 拡張ISO（簡単・計算の両方に同じ state を反映）
   document.querySelectorAll('.exp-iso-toggle').forEach((btn) => {
     btn.setAttribute('aria-checked', String(state.camera.allowExpandedIso));
   });
@@ -1579,6 +1579,8 @@ function warnHtml(w) {
   // **コンテナ側にライブリージョンを置かないこと。**入れ子にすると二重発話になる。
   // 数値の読み上げは #result-announce に集約してあるので、ここは1件ごとの意味付けだけを担う。
   const role = w.level === 'alert' ? 'alert' : 'status';
+  // 3カラムのグリッド（アイコン／本文／?）。**helpId が無くても3列目の幅は CSS が確保する**ので、
+  // ここに空要素を置く必要はない（DOM に意味の無いノードを増やさない）。
   return `<div class="warn-item ${w.level}" role="${role}">
     <svg class="icon" aria-hidden="true"><use href="#i-${w.icon}"></use></svg>
     <span>${w.message}</span>${help}${act}
